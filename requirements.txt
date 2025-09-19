@@ -1,7 +1,9 @@
 flask==3.0.3
-numpy==1.24.3
+numpy==1.26.4
+tflite-runtime==2.14.0
+python-telegram-bot==20.7
 gunicorn==22.0.0
-https://github.com/google-coral/pycoral/releases/download/release-frogfish/tflite_runtime-2.13.0-cp310-cp310-manylinux2014_x86_64.whl
+
 
 
 
