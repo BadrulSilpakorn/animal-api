@@ -14,8 +14,8 @@ input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
 
 # โหลด Telegram Bot
-TELEGRAM_TOKEN = os.getenv("8435446530:AAFVEb_kZsF1Xr1HuU5Zl9aurVbMNfU_etU")
-TELEGRAM_CHAT_ID = os.getenv("6024710139")
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 bot = Bot(token=TELEGRAM_TOKEN)
 
 app = Flask(__name__)
