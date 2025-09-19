@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 import numpy as np
-import cv2
+from PIL import Image   # 👈 แทนที่ cv2
+import io
 import base64
 import tflite_runtime.interpreter as tflite
 from telegram import Bot
@@ -31,14 +32,14 @@ def predict():
         if img_base64 is None:
             return jsonify({"error": "No image data"}), 400
 
-        # decode base64 → numpy array
+        # decode base64 → Image (Pillow)
         img_bytes = base64.b64decode(img_base64)
-        img_arr = np.frombuffer(img_bytes, np.uint8)
-        img = cv2.imdecode(img_arr, cv2.IMREAD_COLOR)
+        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
 
         # resize ตาม input model
         target_shape = input_details[0]['shape'][1:3]  # (height, width)
-        img_resized = cv2.resize(img, (target_shape[1], target_shape[0]))
+        img_resized = img.resize((target_shape[1], target_shape[0]))
+        img_resized = np.array(img_resized)
         img_normalized = img_resized.astype(np.float32) / 255.0
         img_input = np.expand_dims(img_normalized, axis=0)
 
