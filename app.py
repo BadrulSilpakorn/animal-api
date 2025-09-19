@@ -8,7 +8,7 @@ from telegram import Bot
 import os
 
 # โหลดโมเดล TFLite
-interpreter = tflite.Interpreter(model_path="model.tflite")
+interpreter = tflite.Interpreter(model_path="animal_model_int8.tflite")
 interpreter.allocate_tensors()
 input_details = interpreter.get_input_details()
 output_details = interpreter.get_output_details()
