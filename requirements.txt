@@ -1,5 +1,4 @@
-flask
-numpy
-opencv-python-headless
-tensorflow==2.17.1
-gunicorn
+flask==3.0.3
+numpy==2.0.2
+gunicorn==22.0.0
+
