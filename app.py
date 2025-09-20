@@ -1,13 +1,29 @@
 from flask import Flask
-from telegram import Bot
 import os
-
-# โหลด Telegram Bot
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-bot = Bot(token=TELEGRAM_TOKEN)
+import requests
 
 app = Flask(__name__)
+
+# โหลด Environment Variables
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+
+print("🚀 TELEGRAM_TOKEN:", TELEGRAM_TOKEN)
+print("🚀 TELEGRAM_CHAT_ID:", TELEGRAM_CHAT_ID)
+
+def send_telegram_message(text):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return {"error": "Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID"}
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    data = {"chat_id": TELEGRAM_CHAT_ID, "text": text}
+
+    try:
+        r = requests.post(url, data=data)
+        print("📡 Telegram Response:", r.text)
+        return r.json()
+    except Exception as e:
+        return {"error": str(e)}
 
 @app.route("/")
 def home():
@@ -15,13 +31,7 @@ def home():
 
 @app.route("/testsend")
 def testsend():
-    try:
-        message = "📢 Hello! This is a test message from app.py 🚀"
-        print("📢 Sending Telegram:", message)
-        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
-        return "Message sent to Telegram!"
-    except Exception as e:
-        return str(e), 500
+    return send_telegram_message("📢 Hello! This is a test message from Render 🚀")
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=5000)
