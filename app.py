@@ -1,6 +1,6 @@
 from flask import Flask, request, jsonify
 import numpy as np
-from PIL import Image   # 👈 แทนที่ cv2
+from PIL import Image
 import io
 import base64
 import tflite_runtime.interpreter as tflite
@@ -24,6 +24,17 @@ app = Flask(__name__)
 def home():
     return "✅ TFLite Inference API with Telegram Alert is running"
 
+# ✅ Route สำหรับทดสอบ Telegram โดยตรง
+@app.route("/testbot")
+def testbot():
+    try:
+        test_msg = "✅ Render Bot is working!"
+        print("📢 Sending Telegram (test):", test_msg)
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=test_msg)
+        return "Message sent to Telegram!"
+    except Exception as e:
+        return str(e)
+
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
@@ -32,7 +43,7 @@ def predict():
         if img_base64 is None:
             return jsonify({"error": "No image data"}), 400
 
-        # decode base64 → Image (Pillow)
+        # decode base64 → Image
         img_bytes = base64.b64decode(img_base64)
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
 
@@ -41,7 +52,7 @@ def predict():
         img_resized = img.resize((target_shape[1], target_shape[0]))
         img_resized = np.array(img_resized)
 
-        # ✅ ใช้ uint8 แทน float32
+        # ใช้ uint8 ตรงกับโมเดล INT8
         img_input = np.expand_dims(img_resized.astype(np.uint8), axis=0)
 
         # run inference
@@ -49,18 +60,19 @@ def predict():
         interpreter.invoke()
         output = interpreter.get_tensor(output_details[0]['index'])
 
-        # สมมติ label คือ [nottarget, cow, goat, sheep]
+        # labels
         labels = ["nottarget", "cow", "goat", "sheep"]
         pred_idx = int(np.argmax(output))
         pred_label = labels[pred_idx]
         confidence = float(np.max(output))
 
-        # ✅ แจ้งเตือนทั้งสองกรณี
+        # ✅ ส่งแจ้งเตือน Telegram พร้อม log
         if pred_label != "nottarget":
             message = f"🚨 Intrusion Detected: {pred_label} (confidence {confidence:.2f})"
         else:
             message = f"✅ No animal detected (confidence {confidence:.2f})"
 
+        print("📢 Sending Telegram (predict):", message)
         bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
 
         return jsonify({
