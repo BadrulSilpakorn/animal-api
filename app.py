@@ -40,8 +40,9 @@ def predict():
         target_shape = input_details[0]['shape'][1:3]  # (height, width)
         img_resized = img.resize((target_shape[1], target_shape[0]))
         img_resized = np.array(img_resized)
-        img_normalized = img_resized.astype(np.float32) / 255.0
-        img_input = np.expand_dims(img_normalized, axis=0)
+
+        # ✅ ใช้ uint8 แทน float32
+        img_input = np.expand_dims(img_resized.astype(np.uint8), axis=0)
 
         # run inference
         interpreter.set_tensor(input_details[0]['index'], img_input)
@@ -54,10 +55,13 @@ def predict():
         pred_label = labels[pred_idx]
         confidence = float(np.max(output))
 
-        # ส่งแจ้งเตือนถ้าไม่ใช่ nottarget
+        # ✅ แจ้งเตือนทั้งสองกรณี
         if pred_label != "nottarget":
             message = f"🚨 Intrusion Detected: {pred_label} (confidence {confidence:.2f})"
-            bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
+        else:
+            message = f"✅ No animal detected (confidence {confidence:.2f})"
+
+        bot.send_message(chat_id=TELEGRAM_CHAT_ID, text=message)
 
         return jsonify({
             "prediction": pred_label,
