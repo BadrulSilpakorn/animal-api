@@ -6,6 +6,7 @@ import base64
 import tflite_runtime.interpreter as tflite
 import requests
 import os
+from datetime import datetime  # ⭐ เพิ่มบรรทัดนี้
 
 app = Flask(__name__)
 
@@ -26,6 +27,10 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 print(f"🔑 TELEGRAM_TOKEN: {'✅ Set' if TELEGRAM_TOKEN else '❌ Missing'}")
 print(f"🔑 TELEGRAM_CHAT_ID: {'✅ Set' if TELEGRAM_CHAT_ID else '❌ Missing'}")
+
+def get_current_time():
+    """ได้เวลาปัจจุบัน"""
+    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 def send_telegram_message(text):
     """ส่งข้อความไป Telegram ด้วย requests"""
@@ -125,19 +130,28 @@ def add_prediction_overlay(image, prediction, confidence):
             emoji = "✅"
         
         confidence_text = f"Confidence: {confidence:.1%}"
+        time_text = f"Time: {get_current_time()}"  # ⭐ เปลี่ยนจาก pd เป็น get_current_time()
         
         # คำนวณตำแหน่งข้อความ
         img_width, img_height = img_copy.size
         
         # วาดพื้นหลังสำหรับข้อความ
-        overlay_height = font_size * 4
+        overlay_height = font_size * 5  # เพิ่มพื้นที่สำหรับเวลา
         overlay = Image.new('RGBA', (img_width, overlay_height), (0, 0, 0, 180))
         img_copy.paste(overlay, (0, 0), overlay)
         
         # วาดข้อความหลัก
-        draw.text((10, 5), f"{emoji} {text}", fill=color, font=font)
-        draw.text((10, font_size + 10), confidence_text, fill="#FFFFFF", font=font)
-        draw.text((10, (font_size * 2) + 15), f"Status: {status_text}", fill=color, font=font)
+        y_pos = 5
+        draw.text((10, y_pos), f"{emoji} {text}", fill=color, font=font)
+        
+        y_pos += font_size + 5
+        draw.text((10, y_pos), confidence_text, fill="#FFFFFF", font=font)
+        
+        y_pos += font_size + 5
+        draw.text((10, y_pos), f"Status: {status_text}", fill=color, font=font)
+        
+        y_pos += font_size + 5
+        draw.text((10, y_pos), time_text, fill="#FFFFFF", font=font)
         
         # เพิ่มกรอบ
         border_width = 5
@@ -156,14 +170,15 @@ def home():
         "status": "running",
         "message": "✅ TFLite Inference API with Telegram Alert & Photo is running",
         "model_loaded": interpreter is not None,
-        "telegram_configured": bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
+        "telegram_configured": bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID),
+        "current_time": get_current_time()
     })
 
 @app.route("/testbot")
 def testbot():
     """ทดสอบส่งข้อความ Telegram"""
     try:
-        test_msg = "✅ Render Bot is working! 🚀\n📸 Photo sending feature enabled"
+        test_msg = f"✅ Render Bot is working! 🚀\n📸 Photo sending feature enabled\n⏰ Test time: {get_current_time()}"
         print(f"📢 Sending test message: {test_msg}")
         
         result = send_telegram_message(test_msg)
@@ -240,18 +255,20 @@ def predict():
         img_bytes_with_overlay = img_buffer.getvalue()
 
         # สร้างข้อความแจ้งเตือน
+        current_time = get_current_time()  # ⭐ ใช้ get_current_time()
+        
         if pred_label != "nottarget":
             caption = f"🚨 <b>Intrusion Alert!</b>\n"
             caption += f"🐄 Animal: <b>{pred_label.upper()}</b>\n"
             caption += f"📊 Confidence: <b>{confidence:.1%}</b>\n"
-            caption += f"⏰ Detection Time: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            caption += f"⏰ Detection Time: {current_time}"
             
             # ส่งรูปภาพไป Telegram
             photo_result = send_telegram_photo(img_bytes_with_overlay, caption)
         else:
             caption = f"✅ <b>No Animal Detected</b>\n"
             caption += f"📊 Confidence: <b>{confidence:.1%}</b>\n"
-            caption += f"⏰ Scan Time: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            caption += f"⏰ Scan Time: {current_time}"
             
             # ส่งรูปภาพไป Telegram (แม้ไม่เจอสัตว์)
             photo_result = send_telegram_photo(img_bytes_with_overlay, caption)
@@ -260,7 +277,8 @@ def predict():
         response_data = {
             "prediction": pred_label,
             "confidence": confidence,
-            "photo_sent": photo_result.get("success", False)
+            "photo_sent": photo_result.get("success", False),
+            "timestamp": current_time
         }
         
         if not photo_result.get("success"):
@@ -275,7 +293,7 @@ def predict():
         
         # ส่งข้อความ error ไป Telegram
         try:
-            send_telegram_message(f"❌ <b>API Error:</b>\n{str(e)}")
+            send_telegram_message(f"❌ <b>API Error:</b>\n{str(e)}\n⏰ {get_current_time()}")
         except:
             pass
             
@@ -288,8 +306,9 @@ def health():
         "status": "healthy",
         "model_loaded": interpreter is not None,
         "telegram_configured": bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID),
-        "features": ["text_alerts", "photo_sending", "prediction_overlay"],
-        "endpoints": ["/", "/predict", "/testbot", "/health"]
+        "features": ["text_alerts", "photo_sending", "prediction_overlay", "timestamp"],
+        "endpoints": ["/", "/predict", "/testbot", "/health"],
+        "current_time": get_current_time()
     })
 
 if __name__ == "__main__":
