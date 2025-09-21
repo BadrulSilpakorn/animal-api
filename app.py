@@ -1,3 +1,4 @@
+
 from flask import Flask, request, jsonify
 import numpy as np
 from PIL import Image
@@ -6,8 +7,7 @@ import base64
 import tflite_runtime.interpreter as tflite
 import requests
 import os
-import pytz
-from datetime import datetime
+from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
@@ -30,13 +30,14 @@ print(f"🔑 TELEGRAM_TOKEN: {'✅ Set' if TELEGRAM_TOKEN else '❌ Missing'}")
 print(f"🔑 TELEGRAM_CHAT_ID: {'✅ Set' if TELEGRAM_CHAT_ID else '❌ Missing'}")
 
 def get_thailand_time():
-    """ได้เวลาไทยที่ถูกต้อง"""
+    """ได้เวลาไทย (UTC+7) โดยไม่ใช้ pytz"""
     try:
-        thailand_tz = pytz.timezone('Asia/Bangkok')
-        now = datetime.now(thailand_tz)
-        return now.strftime('%Y-%m-%d %H:%M:%S')
+        # เพิ่ม 7 ชั่วโมงจาก UTC เพื่อได้เวลาไทย
+        utc_now = datetime.utcnow()
+        thailand_time = utc_now + timedelta(hours=7)
+        return thailand_time.strftime('%Y-%m-%d %H:%M:%S')
     except:
-        # fallback ถ้าไม่มี pytz
+        # fallback ใช้เวลาท้องถิ่น
         return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 def send_telegram_message(text):
@@ -102,8 +103,16 @@ def send_telegram_photo(image_bytes, caption=""):
 
 def softmax(x):
     """คำนวณ softmax เพื่อแปลง logits เป็น probability"""
-    exp_x = np.exp(x - np.max(x))
-    return exp_x / np.sum(exp_x)
+    try:
+        # ป้องกัน overflow
+        x = np.array(x, dtype=np.float64)
+        x_max = np.max(x)
+        exp_x = np.exp(x - x_max)
+        return exp_x / np.sum(exp_x)
+    except Exception as e:
+        print(f"❌ Softmax error: {e}")
+        # fallback: ใช้ค่าดิบ
+        return x / np.sum(np.abs(x))
 
 @app.route("/")
 def home():
@@ -176,7 +185,7 @@ def predict():
         print("🤖 Running inference...")
         interpreter.set_tensor(input_details[0]['index'], img_input)
         interpreter.invoke()
-        output = interpreter.get_tensor(output_details[0]['index'])[0]  # ⭐ เอา [0] เพื่อลบ batch dimension
+        output = interpreter.get_tensor(output_details[0]['index'])[0]  # ลบ batch dimension
 
         print(f"🔍 Raw output shape: {output.shape}")
         print(f"🔍 Raw output values: {output}")
@@ -190,7 +199,7 @@ def predict():
         
         pred_idx = int(np.argmax(probabilities))
         pred_label = labels[pred_idx]
-        confidence = float(probabilities[pred_idx])  # ⭐ ใช้ probability แทน raw output
+        confidence = float(probabilities[pred_idx])
         
         print(f"🎯 Prediction: {pred_label} (confidence: {confidence:.4f} = {confidence*100:.2f}%)")
 
@@ -202,13 +211,18 @@ def predict():
         # สร้างข้อความแจ้งเตือน
         thailand_time = get_thailand_time()
         
-        if pred_label != "nottarget" and confidence > 0.5:  # เพิ่มเงื่อนไข confidence threshold
+        # กำหนด threshold สำหรับการแจ้งเตือน
+        alert_threshold = 0.6  # 60%
+        
+        if pred_label != "nottarget" and confidence > alert_threshold:
             # ส่งรูปภาพก่อน
-            photo_result = send_telegram_photo(clean_img_bytes, "📸 Detected Image")
+            photo_result = send_telegram_photo(clean_img_bytes, "📸 Animal Detected!")
             
             # ส่งข้อความแยกต่างหาก
+            animal_emoji = {"cow": "🐄", "goat": "🐐", "sheep": "🐑"}.get(pred_label, "🐾")
+            
             alert_msg = f"🚨 <b>Animal Intrusion Alert!</b>\n\n"
-            alert_msg += f"🐄 <b>Animal:</b> {pred_label.upper()}\n"
+            alert_msg += f"{animal_emoji} <b>Animal:</b> {pred_label.upper()}\n"
             alert_msg += f"📊 <b>Confidence:</b> {confidence*100:.1f}%\n"
             alert_msg += f"⏰ <b>Detection Time:</b> {thailand_time}\n"
             alert_msg += f"📍 <b>Location:</b> Farm Camera\n\n"
@@ -218,11 +232,11 @@ def predict():
             
         else:
             # ส่งรูปภาพก่อน
-            photo_result = send_telegram_photo(clean_img_bytes, "📸 Scan Result")
+            photo_result = send_telegram_photo(clean_img_bytes, "📸 Security Scan")
             
             # ส่งข้อความแยกต่างหาก
             safe_msg = f"✅ <b>Area Scan Complete</b>\n\n"
-            safe_msg += f"🔍 <b>Result:</b> No animals detected\n"
+            safe_msg += f"🔍 <b>Result:</b> No threats detected\n"
             safe_msg += f"📊 <b>Confidence:</b> {confidence*100:.1f}%\n"
             safe_msg += f"⏰ <b>Scan Time:</b> {thailand_time}\n"
             safe_msg += f"📍 <b>Location:</b> Farm Camera\n\n"
@@ -233,7 +247,7 @@ def predict():
         # แสดงความมั่นใจของแต่ละ class
         confidence_breakdown = {}
         for i, label in enumerate(labels):
-            confidence_breakdown[label] = float(probabilities[i] * 100)
+            confidence_breakdown[label] = round(float(probabilities[i] * 100), 2)
         
         # ส่งผลลัพธ์กลับ
         response_data = {
@@ -243,7 +257,8 @@ def predict():
             "photo_sent": photo_result.get("success", False),
             "message_sent": message_result.get("success", False),
             "thailand_time": thailand_time,
-            "is_alert": pred_label != "nottarget" and confidence > 0.5
+            "is_alert": pred_label != "nottarget" and confidence > alert_threshold,
+            "alert_threshold": alert_threshold * 100
         }
         
         if not photo_result.get("success"):
@@ -277,7 +292,13 @@ def health():
         "status": "healthy",
         "model_loaded": interpreter is not None,
         "telegram_configured": bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID),
-        "features": ["clean_image_sending", "separate_text_alerts", "correct_confidence", "thailand_timezone"],
+        "features": [
+            "clean_image_sending", 
+            "separate_text_alerts", 
+            "correct_confidence", 
+            "thailand_timezone_utc7",
+            "confidence_threshold"
+        ],
         "endpoints": ["/", "/predict", "/testbot", "/health"],
         "thailand_time": get_thailand_time()
     })
