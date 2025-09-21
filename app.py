@@ -1,12 +1,13 @@
 from flask import Flask, request, jsonify
 import numpy as np
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image
 import io
 import base64
 import tflite_runtime.interpreter as tflite
 import requests
 import os
-from datetime import datetime  # ⭐ เพิ่มบรรทัดนี้
+import pytz
+from datetime import datetime
 
 app = Flask(__name__)
 
@@ -28,12 +29,18 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 print(f"🔑 TELEGRAM_TOKEN: {'✅ Set' if TELEGRAM_TOKEN else '❌ Missing'}")
 print(f"🔑 TELEGRAM_CHAT_ID: {'✅ Set' if TELEGRAM_CHAT_ID else '❌ Missing'}")
 
-def get_current_time():
-    """ได้เวลาปัจจุบัน"""
-    return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+def get_thailand_time():
+    """ได้เวลาไทยที่ถูกต้อง"""
+    try:
+        thailand_tz = pytz.timezone('Asia/Bangkok')
+        now = datetime.now(thailand_tz)
+        return now.strftime('%Y-%m-%d %H:%M:%S')
+    except:
+        # fallback ถ้าไม่มี pytz
+        return datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 
 def send_telegram_message(text):
-    """ส่งข้อความไป Telegram ด้วย requests"""
+    """ส่งข้อความไป Telegram"""
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
         print("❌ Telegram credentials missing")
         return {"error": "Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID"}
@@ -47,7 +54,7 @@ def send_telegram_message(text):
 
     try:
         response = requests.post(url, data=data, timeout=10)
-        print(f"📡 Telegram API Response: {response.status_code}")
+        print(f"📡 Message API Response: {response.status_code}")
         
         if response.status_code == 200:
             print("✅ Message sent successfully")
@@ -57,7 +64,7 @@ def send_telegram_message(text):
             return {"success": False, "error": f"HTTP {response.status_code}"}
             
     except Exception as e:
-        print(f"❌ Telegram request failed: {e}")
+        print(f"❌ Message request failed: {e}")
         return {"success": False, "error": str(e)}
 
 def send_telegram_photo(image_bytes, caption=""):
@@ -69,7 +76,7 @@ def send_telegram_photo(image_bytes, caption=""):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
     
     files = {
-        'photo': ('image.jpg', image_bytes, 'image/jpeg')
+        'photo': ('detection.jpg', image_bytes, 'image/jpeg')
     }
     
     data = {
@@ -93,98 +100,32 @@ def send_telegram_photo(image_bytes, caption=""):
         print(f"❌ Photo request failed: {e}")
         return {"success": False, "error": str(e)}
 
-def add_prediction_overlay(image, prediction, confidence):
-    """เพิ่ม overlay ผลการวิเคราะห์บนรูปภาพ"""
-    try:
-        # สร้างสำเนาของรูปภาพ
-        img_copy = image.copy()
-        draw = ImageDraw.Draw(img_copy)
-        
-        # กำหนดสี
-        colors = {
-            "cow": "#FF4444",      # แดง
-            "goat": "#44FF44",     # เขียว  
-            "sheep": "#4444FF",    # น้ำเงิน
-            "nottarget": "#888888" # เทา
-        }
-        
-        color = colors.get(prediction, "#FFFFFF")
-        
-        # กำหนดขนาดฟอนต์ตามขนาดรูป
-        font_size = max(20, min(img_copy.width, img_copy.height) // 20)
-        
-        try:
-            # ลองใช้ฟอนต์ default
-            font = ImageFont.load_default()
-        except:
-            font = None
-        
-        # สร้างข้อความ
-        if prediction != "nottarget":
-            text = f"🚨 {prediction.upper()}"
-            status_text = "DETECTED"
-            emoji = "🐄" if prediction == "cow" else "🐐" if prediction == "goat" else "🐑"
-        else:
-            text = "✅ NO ANIMAL"
-            status_text = "SAFE"
-            emoji = "✅"
-        
-        confidence_text = f"Confidence: {confidence:.1%}"
-        time_text = f"Time: {get_current_time()}"  # ⭐ เปลี่ยนจาก pd เป็น get_current_time()
-        
-        # คำนวณตำแหน่งข้อความ
-        img_width, img_height = img_copy.size
-        
-        # วาดพื้นหลังสำหรับข้อความ
-        overlay_height = font_size * 5  # เพิ่มพื้นที่สำหรับเวลา
-        overlay = Image.new('RGBA', (img_width, overlay_height), (0, 0, 0, 180))
-        img_copy.paste(overlay, (0, 0), overlay)
-        
-        # วาดข้อความหลัก
-        y_pos = 5
-        draw.text((10, y_pos), f"{emoji} {text}", fill=color, font=font)
-        
-        y_pos += font_size + 5
-        draw.text((10, y_pos), confidence_text, fill="#FFFFFF", font=font)
-        
-        y_pos += font_size + 5
-        draw.text((10, y_pos), f"Status: {status_text}", fill=color, font=font)
-        
-        y_pos += font_size + 5
-        draw.text((10, y_pos), time_text, fill="#FFFFFF", font=font)
-        
-        # เพิ่มกรอบ
-        border_width = 5
-        draw.rectangle([0, 0, img_width-1, img_height-1], 
-                      outline=color, width=border_width)
-        
-        return img_copy
-        
-    except Exception as e:
-        print(f"❌ Overlay error: {e}")
-        return image  # ส่งรูปต้นฉบับถ้าเกิดข้อผิดพลาด
+def softmax(x):
+    """คำนวณ softmax เพื่อแปลง logits เป็น probability"""
+    exp_x = np.exp(x - np.max(x))
+    return exp_x / np.sum(exp_x)
 
 @app.route("/")
 def home():
     return jsonify({
         "status": "running",
-        "message": "✅ TFLite Inference API with Telegram Alert & Photo is running",
+        "message": "✅ Animal Detection API with Telegram Alert",
         "model_loaded": interpreter is not None,
         "telegram_configured": bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID),
-        "current_time": get_current_time()
+        "thailand_time": get_thailand_time()
     })
 
 @app.route("/testbot")
 def testbot():
     """ทดสอบส่งข้อความ Telegram"""
     try:
-        test_msg = f"✅ Render Bot is working! 🚀\n📸 Photo sending feature enabled\n⏰ Test time: {get_current_time()}"
+        test_msg = f"✅ Animal Detection Bot is working!\n📸 Photo sending ready\n⏰ Thailand Time: {get_thailand_time()}"
         print(f"📢 Sending test message: {test_msg}")
         
         result = send_telegram_message(test_msg)
         
         if result.get("success"):
-            return jsonify({"status": "success", "message": "Message sent to Telegram!"})
+            return jsonify({"status": "success", "message": "Test message sent!"})
         else:
             return jsonify({"status": "error", "error": result.get("error")}), 500
             
@@ -235,54 +176,80 @@ def predict():
         print("🤖 Running inference...")
         interpreter.set_tensor(input_details[0]['index'], img_input)
         interpreter.invoke()
-        output = interpreter.get_tensor(output_details[0]['index'])
+        output = interpreter.get_tensor(output_details[0]['index'])[0]  # ⭐ เอา [0] เพื่อลบ batch dimension
+
+        print(f"🔍 Raw output shape: {output.shape}")
+        print(f"🔍 Raw output values: {output}")
 
         # ประมวลผลผลลัพธ์
         labels = ["nottarget", "cow", "goat", "sheep"]
-        pred_idx = int(np.argmax(output))
+        
+        # แปลง logits เป็น probabilities ด้วย softmax
+        probabilities = softmax(output)
+        print(f"🔍 Probabilities: {probabilities}")
+        
+        pred_idx = int(np.argmax(probabilities))
         pred_label = labels[pred_idx]
-        confidence = float(np.max(output))
+        confidence = float(probabilities[pred_idx])  # ⭐ ใช้ probability แทน raw output
         
-        print(f"🎯 Prediction: {pred_label} (confidence: {confidence:.2f})")
+        print(f"🎯 Prediction: {pred_label} (confidence: {confidence:.4f} = {confidence*100:.2f}%)")
 
-        # สร้างรูปภาพที่มี overlay ผลการวิเคราะห์
-        print("🎨 Adding prediction overlay...")
-        result_img = add_prediction_overlay(original_img, pred_label, confidence)
-        
-        # แปลงรูปภาพเป็น bytes
+        # แปลงรูปต้นฉบับเป็น bytes (ไม่มี overlay)
         img_buffer = io.BytesIO()
-        result_img.save(img_buffer, format='JPEG', quality=85)
-        img_bytes_with_overlay = img_buffer.getvalue()
+        original_img.save(img_buffer, format='JPEG', quality=90)
+        clean_img_bytes = img_buffer.getvalue()
 
         # สร้างข้อความแจ้งเตือน
-        current_time = get_current_time()  # ⭐ ใช้ get_current_time()
+        thailand_time = get_thailand_time()
         
-        if pred_label != "nottarget":
-            caption = f"🚨 <b>Intrusion Alert!</b>\n"
-            caption += f"🐄 Animal: <b>{pred_label.upper()}</b>\n"
-            caption += f"📊 Confidence: <b>{confidence:.1%}</b>\n"
-            caption += f"⏰ Detection Time: {current_time}"
+        if pred_label != "nottarget" and confidence > 0.5:  # เพิ่มเงื่อนไข confidence threshold
+            # ส่งรูปภาพก่อน
+            photo_result = send_telegram_photo(clean_img_bytes, "📸 Detected Image")
             
-            # ส่งรูปภาพไป Telegram
-            photo_result = send_telegram_photo(img_bytes_with_overlay, caption)
+            # ส่งข้อความแยกต่างหาก
+            alert_msg = f"🚨 <b>Animal Intrusion Alert!</b>\n\n"
+            alert_msg += f"🐄 <b>Animal:</b> {pred_label.upper()}\n"
+            alert_msg += f"📊 <b>Confidence:</b> {confidence*100:.1f}%\n"
+            alert_msg += f"⏰ <b>Detection Time:</b> {thailand_time}\n"
+            alert_msg += f"📍 <b>Location:</b> Farm Camera\n\n"
+            alert_msg += f"⚠️ Please check the farm immediately!"
+            
+            message_result = send_telegram_message(alert_msg)
+            
         else:
-            caption = f"✅ <b>No Animal Detected</b>\n"
-            caption += f"📊 Confidence: <b>{confidence:.1%}</b>\n"
-            caption += f"⏰ Scan Time: {current_time}"
+            # ส่งรูปภาพก่อน
+            photo_result = send_telegram_photo(clean_img_bytes, "📸 Scan Result")
             
-            # ส่งรูปภาพไป Telegram (แม้ไม่เจอสัตว์)
-            photo_result = send_telegram_photo(img_bytes_with_overlay, caption)
+            # ส่งข้อความแยกต่างหาก
+            safe_msg = f"✅ <b>Area Scan Complete</b>\n\n"
+            safe_msg += f"🔍 <b>Result:</b> No animals detected\n"
+            safe_msg += f"📊 <b>Confidence:</b> {confidence*100:.1f}%\n"
+            safe_msg += f"⏰ <b>Scan Time:</b> {thailand_time}\n"
+            safe_msg += f"📍 <b>Location:</b> Farm Camera\n\n"
+            safe_msg += f"🛡️ Farm area is secure"
+            
+            message_result = send_telegram_message(safe_msg)
 
+        # แสดงความมั่นใจของแต่ละ class
+        confidence_breakdown = {}
+        for i, label in enumerate(labels):
+            confidence_breakdown[label] = float(probabilities[i] * 100)
+        
         # ส่งผลลัพธ์กลับ
         response_data = {
             "prediction": pred_label,
-            "confidence": confidence,
+            "confidence": round(confidence * 100, 2),  # แปลงเป็น %
+            "confidence_breakdown": confidence_breakdown,
             "photo_sent": photo_result.get("success", False),
-            "timestamp": current_time
+            "message_sent": message_result.get("success", False),
+            "thailand_time": thailand_time,
+            "is_alert": pred_label != "nottarget" and confidence > 0.5
         }
         
         if not photo_result.get("success"):
             response_data["photo_error"] = photo_result.get("error")
+        if not message_result.get("success"):
+            response_data["message_error"] = message_result.get("error")
 
         print(f"✅ Prediction completed: {response_data}")
         return jsonify(response_data)
@@ -293,7 +260,11 @@ def predict():
         
         # ส่งข้อความ error ไป Telegram
         try:
-            send_telegram_message(f"❌ <b>API Error:</b>\n{str(e)}\n⏰ {get_current_time()}")
+            error_alert = f"❌ <b>System Error</b>\n\n"
+            error_alert += f"🔧 <b>Error:</b> {str(e)}\n"
+            error_alert += f"⏰ <b>Time:</b> {get_thailand_time()}\n"
+            error_alert += f"🔄 Please check the system"
+            send_telegram_message(error_alert)
         except:
             pass
             
@@ -306,9 +277,9 @@ def health():
         "status": "healthy",
         "model_loaded": interpreter is not None,
         "telegram_configured": bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID),
-        "features": ["text_alerts", "photo_sending", "prediction_overlay", "timestamp"],
+        "features": ["clean_image_sending", "separate_text_alerts", "correct_confidence", "thailand_timezone"],
         "endpoints": ["/", "/predict", "/testbot", "/health"],
-        "current_time": get_current_time()
+        "thailand_time": get_thailand_time()
     })
 
 if __name__ == "__main__":
