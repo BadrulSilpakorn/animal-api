@@ -1,10 +1,10 @@
 from flask import Flask, request, jsonify
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import io
 import base64
 import tflite_runtime.interpreter as tflite
-import requests  # ใช้ requests แทน telegram library
+import requests
 import os
 
 app = Flask(__name__)
@@ -43,7 +43,6 @@ def send_telegram_message(text):
     try:
         response = requests.post(url, data=data, timeout=10)
         print(f"📡 Telegram API Response: {response.status_code}")
-        print(f"📡 Response body: {response.text}")
         
         if response.status_code == 200:
             print("✅ Message sent successfully")
@@ -56,11 +55,106 @@ def send_telegram_message(text):
         print(f"❌ Telegram request failed: {e}")
         return {"success": False, "error": str(e)}
 
+def send_telegram_photo(image_bytes, caption=""):
+    """ส่งรูปภาพไป Telegram"""
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        print("❌ Telegram credentials missing")
+        return {"error": "Missing TELEGRAM_TOKEN or TELEGRAM_CHAT_ID"}
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+    
+    files = {
+        'photo': ('image.jpg', image_bytes, 'image/jpeg')
+    }
+    
+    data = {
+        'chat_id': TELEGRAM_CHAT_ID,
+        'caption': caption,
+        'parse_mode': 'HTML'
+    }
+
+    try:
+        response = requests.post(url, files=files, data=data, timeout=30)
+        print(f"📸 Photo API Response: {response.status_code}")
+        
+        if response.status_code == 200:
+            print("✅ Photo sent successfully")
+            return {"success": True, "data": response.json()}
+        else:
+            print(f"❌ Failed to send photo: {response.status_code}")
+            return {"success": False, "error": f"HTTP {response.status_code}"}
+            
+    except Exception as e:
+        print(f"❌ Photo request failed: {e}")
+        return {"success": False, "error": str(e)}
+
+def add_prediction_overlay(image, prediction, confidence):
+    """เพิ่ม overlay ผลการวิเคราะห์บนรูปภาพ"""
+    try:
+        # สร้างสำเนาของรูปภาพ
+        img_copy = image.copy()
+        draw = ImageDraw.Draw(img_copy)
+        
+        # กำหนดสี
+        colors = {
+            "cow": "#FF4444",      # แดง
+            "goat": "#44FF44",     # เขียว  
+            "sheep": "#4444FF",    # น้ำเงิน
+            "nottarget": "#888888" # เทา
+        }
+        
+        color = colors.get(prediction, "#FFFFFF")
+        
+        # กำหนดขนาดฟอนต์ตามขนาดรูป
+        font_size = max(20, min(img_copy.width, img_copy.height) // 20)
+        
+        try:
+            # ลองใช้ฟอนต์ default
+            font = ImageFont.load_default()
+        except:
+            font = None
+        
+        # สร้างข้อความ
+        if prediction != "nottarget":
+            text = f"🚨 {prediction.upper()}"
+            status_text = "DETECTED"
+            emoji = "🐄" if prediction == "cow" else "🐐" if prediction == "goat" else "🐑"
+        else:
+            text = "✅ NO ANIMAL"
+            status_text = "SAFE"
+            emoji = "✅"
+        
+        confidence_text = f"Confidence: {confidence:.1%}"
+        
+        # คำนวณตำแหน่งข้อความ
+        img_width, img_height = img_copy.size
+        
+        # วาดพื้นหลังสำหรับข้อความ
+        overlay_height = font_size * 4
+        overlay = Image.new('RGBA', (img_width, overlay_height), (0, 0, 0, 180))
+        img_copy.paste(overlay, (0, 0), overlay)
+        
+        # วาดข้อความหลัก
+        draw.text((10, 5), f"{emoji} {text}", fill=color, font=font)
+        draw.text((10, font_size + 10), confidence_text, fill="#FFFFFF", font=font)
+        draw.text((10, (font_size * 2) + 15), f"Status: {status_text}", fill=color, font=font)
+        
+        # เพิ่มกรอบ
+        border_width = 5
+        draw.rectangle([0, 0, img_width-1, img_height-1], 
+                      outline=color, width=border_width)
+        
+        return img_copy
+        
+    except Exception as e:
+        print(f"❌ Overlay error: {e}")
+        return image  # ส่งรูปต้นฉบับถ้าเกิดข้อผิดพลาด
+
 @app.route("/")
 def home():
     return jsonify({
         "status": "running",
-        "message": "✅ TFLite Inference API with Telegram Alert is running",
+        "message": "✅ TFLite Inference API with Telegram Alert & Photo is running",
         "model_loaded": interpreter is not None,
         "telegram_configured": bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID)
     })
@@ -69,7 +163,7 @@ def home():
 def testbot():
     """ทดสอบส่งข้อความ Telegram"""
     try:
-        test_msg = "✅ Render Bot is working! 🚀"
+        test_msg = "✅ Render Bot is working! 🚀\n📸 Photo sending feature enabled"
         print(f"📢 Sending test message: {test_msg}")
         
         result = send_telegram_message(test_msg)
@@ -106,8 +200,8 @@ def predict():
         # decode base64 → Image
         try:
             img_bytes = base64.b64decode(img_base64)
-            img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
-            print(f"📷 Image decoded successfully: {img.size}")
+            original_img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+            print(f"📷 Image decoded successfully: {original_img.size}")
         except Exception as e:
             error_msg = f"❌ Failed to decode image: {e}"
             print(error_msg)
@@ -115,12 +209,12 @@ def predict():
 
         # resize ตาม input model
         target_shape = input_details[0]['shape'][1:3]  # (height, width)
-        img_resized = img.resize((target_shape[1], target_shape[0]))
-        img_resized = np.array(img_resized)
-        print(f"🔄 Image resized to: {img_resized.shape}")
+        img_resized = original_img.resize((target_shape[1], target_shape[0]))
+        img_resized_array = np.array(img_resized)
+        print(f"🔄 Image resized to: {img_resized_array.shape}")
 
         # เตรียมข้อมูลสำหรับโมเดล
-        img_input = np.expand_dims(img_resized.astype(np.uint8), axis=0)
+        img_input = np.expand_dims(img_resized_array.astype(np.uint8), axis=0)
 
         # run inference
         print("🤖 Running inference...")
@@ -136,23 +230,41 @@ def predict():
         
         print(f"🎯 Prediction: {pred_label} (confidence: {confidence:.2f})")
 
+        # สร้างรูปภาพที่มี overlay ผลการวิเคราะห์
+        print("🎨 Adding prediction overlay...")
+        result_img = add_prediction_overlay(original_img, pred_label, confidence)
+        
+        # แปลงรูปภาพเป็น bytes
+        img_buffer = io.BytesIO()
+        result_img.save(img_buffer, format='JPEG', quality=85)
+        img_bytes_with_overlay = img_buffer.getvalue()
+
         # สร้างข้อความแจ้งเตือน
         if pred_label != "nottarget":
-            message = f"🚨 <b>Intrusion Detected!</b>\n🐄 Animal: <b>{pred_label}</b>\n📊 Confidence: <b>{confidence:.2f}</b>"
-            telegram_result = send_telegram_message(message)
+            caption = f"🚨 <b>Intrusion Alert!</b>\n"
+            caption += f"🐄 Animal: <b>{pred_label.upper()}</b>\n"
+            caption += f"📊 Confidence: <b>{confidence:.1%}</b>\n"
+            caption += f"⏰ Detection Time: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            
+            # ส่งรูปภาพไป Telegram
+            photo_result = send_telegram_photo(img_bytes_with_overlay, caption)
         else:
-            message = f"✅ <b>No animal detected</b>\n📊 Confidence: <b>{confidence:.2f}</b>"
-            telegram_result = send_telegram_message(message)
+            caption = f"✅ <b>No Animal Detected</b>\n"
+            caption += f"📊 Confidence: <b>{confidence:.1%}</b>\n"
+            caption += f"⏰ Scan Time: {pd.Timestamp.now().strftime('%Y-%m-%d %H:%M:%S')}"
+            
+            # ส่งรูปภาพไป Telegram (แม้ไม่เจอสัตว์)
+            photo_result = send_telegram_photo(img_bytes_with_overlay, caption)
 
         # ส่งผลลัพธ์กลับ
         response_data = {
             "prediction": pred_label,
             "confidence": confidence,
-            "telegram_sent": telegram_result.get("success", False)
+            "photo_sent": photo_result.get("success", False)
         }
         
-        if not telegram_result.get("success"):
-            response_data["telegram_error"] = telegram_result.get("error")
+        if not photo_result.get("success"):
+            response_data["photo_error"] = photo_result.get("error")
 
         print(f"✅ Prediction completed: {response_data}")
         return jsonify(response_data)
@@ -176,6 +288,7 @@ def health():
         "status": "healthy",
         "model_loaded": interpreter is not None,
         "telegram_configured": bool(TELEGRAM_TOKEN and TELEGRAM_CHAT_ID),
+        "features": ["text_alerts", "photo_sending", "prediction_overlay"],
         "endpoints": ["/", "/predict", "/testbot", "/health"]
     })
 
