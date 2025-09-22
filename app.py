@@ -13,12 +13,10 @@ app = Flask(__name__)
 def load_tflite():
     """ลองโหลด TFLite หลายวิธี"""
     try:
-        # วิธีที่ 1: tflite-runtime
         import tflite_runtime.interpreter as tflite
         return tflite, "tflite-runtime"
     except ImportError:
         try:
-            # วิธีที่ 2: tensorflow
             import tensorflow as tf
             return tf.lite, "tensorflow"
         except ImportError:
@@ -38,7 +36,6 @@ class SmartModelLoader:
         self.loaded = False
         
     def try_load_model(self, model_path):
-        """ลองโหลดโมเดลไฟล์เดียว"""
         try:
             print(f"🔄 Trying: {model_path}")
             
@@ -46,16 +43,11 @@ class SmartModelLoader:
                 print(f"📄 Not found: {model_path}")
                 return False
                 
-            if tf_type == "tflite-runtime":
-                self.interpreter = tflite_module.Interpreter(model_path=model_path)
-            else:
-                self.interpreter = tflite_module.Interpreter(model_path=model_path)
-            
+            self.interpreter = tflite_module.Interpreter(model_path=model_path)
             self.interpreter.allocate_tensors()
             self.input_details = self.interpreter.get_input_details()
             self.output_details = self.interpreter.get_output_details()
             
-            # ตรวจสอบ model type
             input_dtype = self.input_details[0]['dtype']
             self.model_type = "int8" if input_dtype == np.uint8 else "float32"
             self.model_file = model_path
@@ -70,29 +62,23 @@ class SmartModelLoader:
             return False
     
     def load_any_model(self):
-        """ลองโหลดโมเดลหลายไฟล์"""
-        # เรียงตามความเข้ากันได้ (INT8 ก่อน)
         model_candidates = [
-            "animal_model_int8_v1.tflite",      # Compatible INT8
-            "animal_model_int8.tflite",         # Original INT8  
-            "animal_model_float32_v1.tflite",   # Compatible Float32
-            "animal_model_float32.tflite",      # Original Float32
-            "model.tflite",                     # Generic
-            "animal_classifier.tflite"          # Alternative
+            "animal_model_int8_v1.tflite",
+            "animal_model_int8.tflite",
+            "animal_model_float32_v1.tflite",
+            "animal_model_float32.tflite",
+            "model.tflite",
+            "animal_classifier.tflite"
         ]
-        
         for model_path in model_candidates:
             if self.try_load_model(model_path):
                 return True
-        
         print("❌ No compatible model found!")
         return False
     
     def predict(self, image_array):
-        """ทำนาย"""
         if not self.loaded:
             raise Exception("No model loaded")
-            
         self.interpreter.set_tensor(self.input_details[0]['index'], image_array)
         self.interpreter.invoke()
         return self.interpreter.get_tensor(self.output_details[0]['index'])[0]
@@ -132,11 +118,18 @@ def send_photo(image_bytes, caption=""):
         print(f"❌ Photo error: {e}")
         return False
 
+# โหลด labels.txt ถ้ามี
+def load_labels(path="labels.txt"):
+    if os.path.exists(path):
+        with open(path) as f:
+            return [line.strip() for line in f if line.strip()]
+    return ["nottarget", "cow", "goat", "sheep"]
+
+labels = load_labels()
+
 @app.route("/")
 def home():
-    # ลิสต์ไฟล์ .tflite ที่มี
     tflite_files = [f for f in os.listdir('.') if f.endswith('.tflite')]
-    
     return jsonify({
         "status": "running",
         "tensorflow": tf_type,
@@ -144,13 +137,13 @@ def home():
         "model_file": model.model_file if model.loaded else None,
         "model_type": model.model_type if model.loaded else None,
         "available_models": tflite_files,
+        "labels": labels,
         "time": get_thai_time(),
         "telegram_ready": bool(TOKEN and CHAT_ID)
     })
 
 @app.route("/load-model")
 def load_model():
-    """บังคับโหลดโมเดลใหม่"""
     success = model.load_any_model()
     return jsonify({
         "success": success,
@@ -167,14 +160,12 @@ def test():
     test_msg += f"🤖 Model: {model.model_type or 'None'}\n"
     test_msg += f"📄 File: {model.model_file or 'None'}\n"
     test_msg += f"⏰ Time: {thai_time}"
-    
     result = send_message(test_msg)
     return jsonify({"sent": result, "time": thai_time})
 
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        # Auto-load model ถ้ายังไม่ได้โหลด
         if not model.loaded:
             print("🔄 Auto-loading model...")
             if not model.load_any_model():
@@ -183,39 +174,28 @@ def predict():
         if not request.json or "image" not in request.json:
             return jsonify({"error": "No image provided"}), 400
 
-        # Decode image
         img_base64 = request.json["image"]
         original_bytes = base64.b64decode(img_base64)
         original_img = Image.open(io.BytesIO(original_bytes)).convert("RGB")
-        
         print(f"📸 Original: {original_img.size}")
         
-        # เตรียมภาพสำหรับโมเดล
         target_size = model.input_details[0]['shape'][1:3]
         model_img = original_img.resize((target_size[1], target_size[0]))
         
-        # เตรียม input ตามประเภทโมเดล
         if model.model_type == "float32":
             img_array = np.array(model_img, dtype=np.float32) / 255.0
-        else:  # int8
+        else:
             img_array = np.array(model_img, dtype=np.uint8)
-            
         img_array = np.expand_dims(img_array, axis=0)
         
         print(f"🤖 Input: {img_array.shape} {img_array.dtype}")
         
-        # ทำนาย
         output = model.predict(img_array)
         
-        # ประมวลผล
-        labels = ["safe", "cow", "goat", "sheep"]
-        
         if model.model_type == "float32":
-            # Float32 output
             exp_out = np.exp(output - np.max(output))
             probs = exp_out / np.sum(exp_out)
         else:
-            # INT8 output
             if output.dtype == np.uint8:
                 probs = output.astype(np.float32) / 255.0
             else:
@@ -228,19 +208,16 @@ def predict():
         
         print(f"🎯 {pred_label}: {confidence:.1f}%")
         
-        # เตรียมภาพสำหรับ Telegram
         img_buffer = io.BytesIO()
         if max(original_img.size) > 1280:
             original_img.thumbnail((1280, 1280), Image.Resampling.LANCZOS)
         original_img.save(img_buffer, format='JPEG', quality=85, optimize=True)
         clean_img = img_buffer.getvalue()
         
-        # ส่ง Telegram
         thai_time = get_thai_time()
         ALERT_THRESHOLD = 70.0
         
-        if pred_label != "safe" and confidence > ALERT_THRESHOLD:
-            # Alert
+        if pred_label != "nottarget" and confidence > ALERT_THRESHOLD:
             caption = f"🚨 <b>ALERT!</b>\n🐄 {pred_label.upper()}: {confidence:.1f}%"
             send_photo(clean_img, caption)
             
@@ -249,17 +226,14 @@ def predict():
             alert_msg += f"📊 Confidence: <b>{confidence:.1f}%</b>\n"
             alert_msg += f"⏰ Time: <b>{thai_time}</b>\n"
             alert_msg += f"🤖 Model: {model.model_type}"
-            
             send_message(alert_msg)
         else:
-            # Safe
-            caption = f"✅ <b>Area Clear</b>\nSafe: {confidence:.1f}%"
+            caption = f"✅ <b>Area Clear</b>\nNo target: {confidence:.1f}%"
             send_photo(clean_img, caption)
             
             safe_msg = f"✅ <b>All Clear</b>\n"
             safe_msg += f"📊 Confidence: <b>{confidence:.1f}%</b>\n"
             safe_msg += f"⏰ Time: <b>{thai_time}</b>"
-            
             send_message(safe_msg)
         
         return jsonify({
@@ -270,7 +244,7 @@ def predict():
                 labels[i]: round(float(probs[i] * 100), 1) 
                 for i in range(len(labels))
             },
-            "alert": pred_label != "safe" and confidence > ALERT_THRESHOLD,
+            "alert": pred_label != "nottarget" and confidence > ALERT_THRESHOLD,
             "time": thai_time,
             "model_info": {
                 "file": model.model_file,
@@ -282,16 +256,13 @@ def predict():
     except Exception as e:
         error_msg = str(e)
         print(f"❌ Error: {error_msg}")
-        
         try:
             error_alert = f"❌ <b>ERROR</b>\n{error_msg}\n⏰ {get_thai_time()}"
             send_message(error_alert)
         except:
             pass
-        
         return jsonify({"status": "error", "error": error_msg}), 500
 
-# Auto-load เมื่อเริ่มต้น
 print("🚀 Starting Smart Animal Detection Server...")
 print(f"🧠 TensorFlow: {tf_type}")
 model.load_any_model()
