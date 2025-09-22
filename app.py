@@ -10,14 +10,14 @@ app = Flask(__name__)
 def load_labels(file_path="labels.txt"):
     if not os.path.exists(file_path):
         print("⚠️ labels.txt not found, using fallback labels")
-        return ["nottarget", "cow", "goat", "sheep"]  # fallback
+        return ["nottarget", "cow", "goat", "sheep"]
     with open(file_path, "r") as f:
-        return [line.strip() for line in f.readlines() if line.strip()]
+        return [line.strip() for line in f if line.strip()]
 
 labels = load_labels()
 print(f"📄 Loaded labels: {labels}")
 
-# ==== Multi-TensorFlow Loader ====
+# ==== Load tflite ====
 def load_tflite():
     try:
         import tflite_runtime.interpreter as tflite
@@ -32,16 +32,16 @@ def load_tflite():
 tflite_module, tf_type = load_tflite()
 print(f"🧠 Using: {tf_type}")
 
-# ==== Smart Model Loader ====
+# ==== SmartModelLoader ====
 class SmartModelLoader:
     def __init__(self):
         self.interpreter = None
         self.input_details = None
         self.output_details = None
-        self.model_type = None
         self.model_file = None
+        self.model_type = None
         self.loaded = False
-        
+
     def try_load_model(self, model_path):
         try:
             print(f"🔄 Trying: {model_path}")
@@ -52,8 +52,7 @@ class SmartModelLoader:
             self.interpreter.allocate_tensors()
             self.input_details = self.interpreter.get_input_details()
             self.output_details = self.interpreter.get_output_details()
-            input_dtype = self.input_details[0]['dtype']
-            self.model_type = "int8" if input_dtype == np.uint8 else "float32"
+            self.model_type = "float32"  # 🔒 บังคับ float32 เท่านั้น
             self.model_file = model_path
             self.loaded = True
             print(f"✅ Loaded: {model_path} ({self.model_type})")
@@ -62,15 +61,14 @@ class SmartModelLoader:
         except Exception as e:
             print(f"❌ Failed {model_path}: {e}")
             return False
-    
+
     def load_any_model(self):
-        candidates = ["animal_model_float32_v1.tflite", "animal_model_float32.tflite"]
-        for path in candidates:
+        for path in ["animal_model_float32_v1.tflite", "animal_model_float32.tflite"]:
             if self.try_load_model(path):
                 return True
         print("❌ No compatible model found!")
         return False
-    
+
     def predict(self, image_array):
         if not self.loaded:
             raise Exception("No model loaded")
@@ -117,11 +115,10 @@ def home():
         "tensorflow": tf_type,
         "model_loaded": model.loaded,
         "model_file": model.model_file if model.loaded else None,
-        "model_type": model.model_type if model.loaded else None,
-        "available_models": tflite_files,
         "labels": labels,
         "time": get_thai_time(),
-        "telegram_ready": bool(TOKEN and CHAT_ID)
+        "telegram_ready": bool(TOKEN and CHAT_ID),
+        "available_models": tflite_files
     })
 
 @app.route("/load-model")
@@ -129,8 +126,7 @@ def load_model():
     success = model.load_any_model()
     return jsonify({
         "success": success,
-        "model_file": model.model_file if success else None,
-        "model_type": model.model_type if success else None
+        "model_file": model.model_file if success else None
     })
 
 @app.route("/predict", methods=["POST"])
@@ -142,23 +138,36 @@ def predict():
         if not request.json or "image" not in request.json:
             return jsonify({"error": "No image"}), 400
 
+        # Decode image
         img_base64 = request.json["image"]
         original_bytes = base64.b64decode(img_base64)
         original_img = Image.open(io.BytesIO(original_bytes)).convert("RGB")
 
+        # Resize → float32 (ไม่หาร 255)
         target_size = model.input_details[0]['shape'][1:3]
         model_img = original_img.resize((target_size[1], target_size[0]))
-        if model.model_type == "float32":
-            img_array = np.array(model_img, dtype=np.float32) / 255.0
-        else:
-            img_array = np.array(model_img, dtype=np.uint8)
+        img_array = np.array(model_img, dtype=np.float32)
         img_array = np.expand_dims(img_array, axis=0)
 
-        output = model.predict(img_array)
-        exp_out = np.exp(output - np.max(output))
-        probs = exp_out / np.sum(exp_out)
+        # Debug stats
+        inp_stats = {
+            "min": float(img_array.min()),
+            "max": float(img_array.max()),
+            "mean": float(img_array.mean())
+        }
 
-        pred_idx = np.argmax(probs)
+        # Predict
+        raw = model.predict(img_array)
+        v = raw.astype(np.float32).ravel()
+        s = float(v.sum())
+        if (v >= 0).all() and 0.98 <= s <= 1.02:
+            probs = v / (s if s != 0 else 1.0)
+        else:
+            v = v - v.max()
+            e = np.exp(v, dtype=np.float32)
+            probs = e / e.sum()
+
+        pred_idx = int(np.argmax(probs))
         pred_label = labels[pred_idx]
         confidence = float(probs[pred_idx] * 100)
 
@@ -178,8 +187,9 @@ def predict():
             "prediction": pred_label,
             "confidence": round(confidence, 1),
             "all_predictions": {
-                labels[i]: round(float(probs[i]*100), 1) for i in range(len(labels))
+                labels[i]: round(float(probs[i]*100),1) for i in range(len(labels))
             },
+            "inp_stats": inp_stats,
             "time": get_thai_time()
         })
     except Exception as e:
