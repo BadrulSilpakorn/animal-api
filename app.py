@@ -1,12 +1,12 @@
 from flask import Flask, request, jsonify
 import numpy as np
 from PIL import Image
-import io, base64, requests, os
+import io, requests, os
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# ==== Load labels from labels.txt ====
+# ==== Load labels ====
 def load_labels(file_path="labels.txt"):
     if not os.path.exists(file_path):
         print("⚠️ labels.txt not found, using fallback labels")
@@ -52,7 +52,7 @@ class SmartModelLoader:
             self.interpreter.allocate_tensors()
             self.input_details = self.interpreter.get_input_details()
             self.output_details = self.interpreter.get_output_details()
-            self.model_type = "float32"  # 🔒 บังคับ float32 เท่านั้น
+            self.model_type = "float32"
             self.model_file = model_path
             self.loaded = True
             print(f"✅ Loaded: {model_path} ({self.model_type})")
@@ -85,16 +85,6 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 def get_thai_time():
     return (datetime.utcnow() + timedelta(hours=7)).strftime('%H:%M:%S')
 
-def send_message(text):
-    if not TOKEN or not CHAT_ID:
-        return False
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        data = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
-        return requests.post(url, data=data, timeout=10).status_code == 200
-    except:
-        return False
-
 def send_photo(image_bytes, caption=""):
     if not TOKEN or not CHAT_ID:
         return False
@@ -121,27 +111,22 @@ def home():
         "available_models": tflite_files
     })
 
-@app.route("/load-model")
-def load_model():
-    success = model.load_any_model()
-    return jsonify({
-        "success": success,
-        "model_file": model.model_file if success else None
-    })
-
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
         if not model.loaded:
             if not model.load_any_model():
                 return jsonify({"error": "No model"}), 500
-        if not request.json or "image" not in request.json:
-            return jsonify({"error": "No image"}), 400
 
-        # Decode image
-        img_base64 = request.json["image"]
-        original_bytes = base64.b64decode(img_base64)
-        original_img = Image.open(io.BytesIO(original_bytes)).convert("RGB")
+        # ✅ รับ JPEG จาก multipart/form-data
+        if 'image' not in request.files:
+            return jsonify({"error": "No image file in request"}), 400
+
+        image_file = request.files['image']
+        
+        # ✅ อ่าน binary โดยตรง
+        image_bytes = image_file.read()
+        original_img = Image.open(io.BytesIO(image_bytes)).convert("RGB")
 
         # Resize → float32 (ไม่หาร 255)
         target_size = model.input_details[0]['shape'][1:3]
@@ -149,17 +134,11 @@ def predict():
         img_array = np.array(model_img, dtype=np.float32)
         img_array = np.expand_dims(img_array, axis=0)
 
-        # Debug stats
-        inp_stats = {
-            "min": float(img_array.min()),
-            "max": float(img_array.max()),
-            "mean": float(img_array.mean())
-        }
-
         # Predict
         raw = model.predict(img_array)
         v = raw.astype(np.float32).ravel()
         s = float(v.sum())
+        
         if (v >= 0).all() and 0.98 <= s <= 1.02:
             probs = v / (s if s != 0 else 1.0)
         else:
@@ -172,16 +151,12 @@ def predict():
         confidence = float(probs[pred_idx] * 100)
 
         # ส่งไป Telegram
-        img_buffer = io.BytesIO()
-        original_img.save(img_buffer, format='JPEG', quality=85)
-        img_data = img_buffer.getvalue()
-
         if pred_label != "nottarget" and confidence > 70:
             caption = f"🚨 ALERT: {pred_label.upper()} {confidence:.1f}%"
-            send_photo(img_data, caption)
+            send_photo(image_bytes, caption)
         else:
             caption = f"✅ Clear: {pred_label} {confidence:.1f}%"
-            send_photo(img_data, caption)
+            send_photo(image_bytes, caption)
 
         return jsonify({
             "prediction": pred_label,
@@ -189,10 +164,11 @@ def predict():
             "all_predictions": {
                 labels[i]: round(float(probs[i]*100),1) for i in range(len(labels))
             },
-            "inp_stats": inp_stats,
             "time": get_thai_time()
         })
+        
     except Exception as e:
+        print(f"❌ Error: {e}")
         return jsonify({"error": str(e)}), 500
 
 print("🚀 Starting server...")
@@ -201,4 +177,3 @@ model.load_any_model()
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port, debug=False)
-
