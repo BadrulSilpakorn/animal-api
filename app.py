@@ -3,6 +3,7 @@ import numpy as np
 from PIL import Image
 import io, base64, requests, os
 from datetime import datetime, timedelta
+from gtts import gTTS  
 
 app = Flask(__name__)
 
@@ -85,25 +86,36 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 def get_thai_time():
     return (datetime.utcnow() + timedelta(hours=7)).strftime('%H:%M:%S')
 
-def send_message(text):
-    if not TOKEN or not CHAT_ID:
-        return False
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        data = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
-        return requests.post(url, data=data, timeout=10).status_code == 200
-    except:
-        return False
-
-def send_photo(image_bytes, caption=""):
+# ==== Telegram utilities ====
+def send_photo(image_bytes, caption="", silent=False):
     if not TOKEN or not CHAT_ID:
         return False
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
         files = {'photo': ('img.jpg', image_bytes, 'image/jpeg')}
-        data = {'chat_id': CHAT_ID, 'caption': caption, 'parse_mode': 'HTML'}
+        data = {
+            'chat_id': CHAT_ID,
+            'caption': caption,
+            'parse_mode': 'HTML',
+            'disable_notification': silent   # ✅ True = ไม่มีเสียงแจ้งเตือน
+        }
         return requests.post(url, files=files, data=data, timeout=15).status_code == 200
-    except:
+    except Exception as e:
+        print("❌ Telegram error:", e)
+        return False
+
+def send_audio(file_path, caption=""):
+    """ส่งเสียงพูดไป Telegram"""
+    if not TOKEN or not CHAT_ID:
+        return False
+    try:
+        url = f"https://api.telegram.org/bot{TOKEN}/sendAudio"
+        files = {'audio': open(file_path, 'rb')}
+        data = {'chat_id': CHAT_ID, 'caption': caption, 'parse_mode': 'HTML'}
+        r = requests.post(url, files=files, data=data, timeout=15)
+        return r.status_code == 200
+    except Exception as e:
+        print("❌ Audio send error:", e)
         return False
 
 # ==== Routes ====
@@ -150,25 +162,12 @@ def predict():
         img_array = np.array(model_img, dtype=np.float32)
         img_array = np.expand_dims(img_array, axis=0)
 
-        # Stats
-        inp_stats = {
-            "min": float(img_array.min()),
-            "max": float(img_array.max()),
-            "mean": float(img_array.mean())
-        }
-
         # Predict
         raw = model.predict(img_array)
         v = raw.astype(np.float32).ravel()
-        s = float(v.sum())
-        if (v >= 0).all() and 0.98 <= s <= 1.02:
-            probs = v / (s if s != 0 else 1.0)
-        else:
-            v = v - v.max()
-            e = np.exp(v, dtype=np.float32)
-            probs = e / e.sum()
+        v = np.exp(v - np.max(v))
+        probs = v / v.sum()
 
-        # Highest confidence only
         pred_idx = int(np.argmax(probs))
         pred_label = labels[pred_idx]
         confidence = float(probs[pred_idx] * 100)
@@ -178,27 +177,31 @@ def predict():
         original_img.save(img_buffer, format='JPEG', quality=85)
         img_data = img_buffer.getvalue()
 
-        # Notification logic
+        # ==== Notification logic ====
         if pred_label == "nottarget":
-            caption = f"✅ Clear ({pred_label}) {confidence:.1f}%"
+            caption = f"✅ Clear area ({confidence:.1f}%)"
+            send_photo(img_data, caption, silent=True)  # 👈 เงียบ
         else:
-            caption = f"🚨 ALERT: {pred_label.upper()} {confidence:.1f}%"
+            caption = f"🚨 ALERT: {pred_label.upper()} detected ({confidence:.1f}%)"
+            send_photo(img_data, caption, silent=False)  # 👈 ดัง
+            # ✅ สร้างเสียงพูด
+            speech = f"{pred_label} detected!"
+            tts = gTTS(text=speech, lang='en')
+            audio_file = f"{pred_label}.mp3"
+            tts.save(audio_file)
+            send_audio(audio_file, caption=f"🔊 {speech}")
+            os.remove(audio_file)
 
-        send_photo(img_data, caption)
-
-        # Return response
+        # ==== Response ====
         return jsonify({
             "prediction": pred_label,
             "confidence": round(confidence, 1),
-            "all_predictions": {
-                labels[i]: round(float(probs[i]*100), 1) for i in range(len(labels))
-            },
-            "inp_stats": inp_stats,
             "time": get_thai_time()
         })
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
+
 
 print("🚀 Starting server...")
 model.load_any_model()
