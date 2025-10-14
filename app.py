@@ -3,7 +3,6 @@ import numpy as np
 from PIL import Image
 import io, base64, requests, os
 from datetime import datetime, timedelta
-from gtts import gTTS  
 
 app = Flask(__name__)
 
@@ -57,7 +56,7 @@ class SmartModelLoader:
             self.model_file = model_path
             self.loaded = True
             print(f"✅ Loaded: {model_path}")
-            print(f"📐 Input: {self.input_details[0]['shape']}")
+            print(f"📐 Input shape: {self.input_details[0]['shape']}")
             return True
         except Exception as e:
             print(f"❌ Failed to load {model_path}: {e}")
@@ -77,6 +76,7 @@ class SmartModelLoader:
         self.interpreter.invoke()
         return self.interpreter.get_tensor(self.output_details[0]['index'])[0]
 
+
 model = SmartModelLoader()
 
 # ==== Telegram config ====
@@ -86,9 +86,10 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 def get_thai_time():
     return (datetime.utcnow() + timedelta(hours=7)).strftime('%H:%M:%S')
 
-# ==== Telegram utilities ====
+# ==== Telegram send photo ====
 def send_photo(image_bytes, caption="", silent=False):
     if not TOKEN or not CHAT_ID:
+        print("⚠️ Telegram not configured.")
         return False
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
@@ -97,26 +98,14 @@ def send_photo(image_bytes, caption="", silent=False):
             'chat_id': CHAT_ID,
             'caption': caption,
             'parse_mode': 'HTML',
-            'disable_notification': silent   # ✅ True = ไม่มีเสียงแจ้งเตือน
+            'disable_notification': silent  # ✅ True = เงียบ, False = มีเสียงแจ้งเตือน
         }
-        return requests.post(url, files=files, data=data, timeout=15).status_code == 200
+        r = requests.post(url, files=files, data=data, timeout=15)
+        return r.status_code == 200
     except Exception as e:
         print("❌ Telegram error:", e)
         return False
 
-def send_audio(file_path, caption=""):
-    """ส่งเสียงพูดไป Telegram"""
-    if not TOKEN or not CHAT_ID:
-        return False
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendAudio"
-        files = {'audio': open(file_path, 'rb')}
-        data = {'chat_id': CHAT_ID, 'caption': caption, 'parse_mode': 'HTML'}
-        r = requests.post(url, files=files, data=data, timeout=15)
-        return r.status_code == 200
-    except Exception as e:
-        print("❌ Audio send error:", e)
-        return False
 
 # ==== Routes ====
 @app.route("/")
@@ -133,6 +122,7 @@ def home():
         "available_models": tflite_files
     })
 
+
 @app.route("/load-model")
 def load_model():
     success = model.load_any_model()
@@ -141,17 +131,20 @@ def load_model():
         "model_file": model.model_file if success else None
     })
 
+
 # ==== Prediction route ====
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
+        # ตรวจว่าโหลดโมเดลแล้วหรือยัง
         if not model.loaded:
             if not model.load_any_model():
                 return jsonify({"error": "No model loaded"}), 500
-        if not request.json or "image" not in request.json:
-            return jsonify({"error": "No image"}), 400
 
-        # Decode image
+        if not request.json or "image" not in request.json:
+            return jsonify({"error": "No image provided"}), 400
+
+        # แปลงภาพ Base64
         img_base64 = request.json["image"]
         original_bytes = base64.b64decode(img_base64)
         original_img = Image.open(io.BytesIO(original_bytes)).convert("RGB")
@@ -172,7 +165,7 @@ def predict():
         pred_label = labels[pred_idx]
         confidence = float(probs[pred_idx] * 100)
 
-        # Prepare image
+        # เตรียมรูปภาพสำหรับส่ง
         img_buffer = io.BytesIO()
         original_img.save(img_buffer, format='JPEG', quality=85)
         img_data = img_buffer.getvalue()
@@ -180,19 +173,13 @@ def predict():
         # ==== Notification logic ====
         if pred_label == "nottarget":
             caption = f"✅ Clear area ({confidence:.1f}%)"
-            send_photo(img_data, caption, silent=True)  # 👈 เงียบ
+            silent = True   # 🤫 ไม่มีเสียง
         else:
             caption = f"🚨 ALERT: {pred_label.upper()} detected ({confidence:.1f}%)"
-            send_photo(img_data, caption, silent=False)  # 👈 ดัง
-            # ✅ สร้างเสียงพูด
-            speech = f"{pred_label} detected!"
-            tts = gTTS(text=speech, lang='en')
-            audio_file = f"{pred_label}.mp3"
-            tts.save(audio_file)
-            send_audio(audio_file, caption=f"🔊 {speech}")
-            os.remove(audio_file)
+            silent = False  # 🔊 มีเสียงแจ้งเตือน
 
-        # ==== Response ====
+        send_photo(img_data, caption, silent=silent)
+
         return jsonify({
             "prediction": pred_label,
             "confidence": round(confidence, 1),
