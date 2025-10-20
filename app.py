@@ -1,196 +1,115 @@
 from flask import Flask, request, jsonify
-import numpy as np
+import numpy as np, io, base64, requests, os
 from PIL import Image
-import io, base64, requests, os
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# ==== โหลด labels ====
-def load_labels(file_path="labels.txt"):
-    if not os.path.exists(file_path):
-        print("⚠️ labels.txt not found, using fallback labels")
-        return ["nottarget", "cow", "goat", "sheep"]
-    with open(file_path, "r") as f:
-        return [line.strip() for line in f if line.strip()]
+# ===== โหลด labels =====
+def load_labels(path="labels.txt"):
+    if os.path.exists(path):
+        with open(path) as f:
+            return [line.strip() for line in f if line.strip()]
+    return ["nottarget", "cow", "goat", "sheep"]
+
 labels = load_labels()
-print(f" Loaded labels: {labels}")
+print("Labels:", labels)
 
-# ==== โหลด TensorFlow Lite ====
-def load_tflite():
-    try:
-        import tflite_runtime.interpreter as tflite
-        return tflite, "tflite-runtime"
-    except ImportError:
-        try:
-            import tensorflow as tf
-            return tf.lite, "tensorflow"
-        except ImportError:
-            return None, "none"
-tflite_module, tf_type = load_tflite()
-print(f" Using: {tf_type}")
+# ===== โหลดโมดูล TensorFlow Lite =====
+try:
+    import tflite_runtime.interpreter as tflite
+except ImportError:
+    import tensorflow as tf
+    tflite = tf.lite
 
-# ==== SmartModelLoader ====
-class SmartModelLoader:
+# ===== โหลดโมเดล =====
+class Model:
     def __init__(self):
         self.interpreter = None
-        self.input_details = None
-        self.output_details = None
-        self.model_file = None
-        self.model_type = None
+        self.input = None
+        self.output = None
         self.loaded = False
 
-    def try_load_model(self, model_path):
-        try:
-            print(f"Trying: {model_path}")
-            if not os.path.exists(model_path):
-                print(f"Not found: {model_path}")
-                return False
-            self.interpreter = tflite_module.Interpreter(model_path=model_path)
-            self.interpreter.allocate_tensors()
-            self.input_details = self.interpreter.get_input_details()
-            self.output_details = self.interpreter.get_output_details()
-            self.model_type = "float32"
-            self.model_file = model_path
-            self.loaded = True
-            print(f"Loaded: {model_path}")
-            print(f"Input shape: {self.input_details[0]['shape']}")
-            return True
-        except Exception as e:
-            print(f"Failed to load {model_path}: {e}")
+    def load(self, path="animal_model_float32.tflite"):
+        if not os.path.exists(path):
+            print("Model not found.")
             return False
+        self.interpreter = tflite.Interpreter(model_path=path)
+        self.interpreter.allocate_tensors()
+        self.input = self.interpreter.get_input_details()[0]
+        self.output = self.interpreter.get_output_details()[0]
+        self.loaded = True
+        print("Model loaded:", path)
+        return True
 
-    def load_any_model(self):
-        for path in ["animal_model_float32_v1.tflite", "animal_model_float32.tflite"]:
-            if self.try_load_model(path):
-                return True
-        print("No compatible model found!")
-        return False
-
-    def predict(self, image_array):
-        if not self.loaded:
-            raise Exception("No model loaded")
-        self.interpreter.set_tensor(self.input_details[0]['index'], image_array)
+    def predict(self, arr):
+        self.interpreter.set_tensor(self.input["index"], arr)
         self.interpreter.invoke()
-        return self.interpreter.get_tensor(self.output_details[0]['index'])[0]
+        return self.interpreter.get_tensor(self.output["index"])[0]
 
+model = Model()
+model.load()
 
-model = SmartModelLoader()
-
-# ==== Telegram config ====
+# ===== Telegram Config =====
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+TG_URL = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
 
-def get_thai_time():
-    return (datetime.utcnow() + timedelta(hours=7)).strftime('%H:%M:%S')
+def now():
+    return (datetime.utcnow() + timedelta(hours=7)).strftime("%H:%M:%S")
 
-# ==== Telegram send photo ====
-def send_photo(image_bytes, caption="", silent=False):
-    if not TOKEN or not CHAT_ID:
-        print("Telegram not configured.")
-        return False
+def send_photo(img, caption, silent=False):
+    if not TOKEN or not CHAT_ID: 
+        return
     try:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
-        files = {'photo': ('img.jpg', image_bytes, 'image/jpeg')}
-        data = {
-            'chat_id': CHAT_ID,
-            'caption': caption,
-            'parse_mode': 'HTML',
-            'disable_notification': silent  
-        }
-        r = requests.post(url, files=files, data=data, timeout=15)
-        return r.status_code == 200
+        r = requests.post(TG_URL, files={'photo': ('img.jpg', img, 'image/jpeg')},
+                          data={'chat_id': CHAT_ID, 'caption': caption,
+                                'disable_notification': silent}, timeout=10)
+        print("Telegram:", r.status_code)
     except Exception as e:
         print("Telegram error:", e)
-        return False
 
-
-# ==== Routes ====
+# ===== Routes =====
 @app.route("/")
 def home():
-    tflite_files = [f for f in os.listdir('.') if f.endswith('.tflite')]
     return jsonify({
         "status": "running",
-        "tensorflow": tf_type,
         "model_loaded": model.loaded,
-        "model_file": model.model_file if model.loaded else None,
         "labels": labels,
-        "time": get_thai_time(),
-        "telegram_ready": bool(TOKEN and CHAT_ID),
-        "available_models": tflite_files
+        "time": now()
     })
 
-
-@app.route("/load-model")
-def load_model():
-    success = model.load_any_model()
-    return jsonify({
-        "success": success,
-        "model_file": model.model_file if success else None
-    })
-
-
-# ==== Prediction route ====
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
-        # ตรวจว่าโหลดโมเดลแล้วหรือยัง
         if not model.loaded:
-            if not model.load_any_model():
-                return jsonify({"error": "No model loaded"}), 500
+            if not model.load(): 
+                return jsonify({"error": "model not loaded"}), 500
 
-        if not request.json or "image" not in request.json:
-            return jsonify({"error": "No image provided"}), 400
+        img_b64 = request.json.get("image")
+        if not img_b64:
+            return jsonify({"error": "no image"}), 400
 
-        # แปลงภาพ Base64
-        img_base64 = request.json["image"]
-        original_bytes = base64.b64decode(img_base64)
-        original_img = Image.open(io.BytesIO(original_bytes)).convert("RGB")
+        img = Image.open(io.BytesIO(base64.b64decode(img_b64))).convert("RGB")
+        h, w = model.input["shape"][1:3]
+        arr = np.expand_dims(np.array(img.resize((w, h)), np.float32), 0)
 
-        # Resize → float32
-        target_size = model.input_details[0]['shape'][1:3]
-        model_img = original_img.resize((target_size[1], target_size[0]))
-        img_array = np.array(model_img, dtype=np.float32)
-        img_array = np.expand_dims(img_array, axis=0)
+        pred = model.predict(arr)
+        probs = np.exp(pred - np.max(pred))
+        probs /= probs.sum()
+        idx = np.argmax(probs)
+        label, conf = labels[idx], float(probs[idx] * 100)
 
-        # Predict
-        raw = model.predict(img_array)
-        v = raw.astype(np.float32).ravel()
-        v = np.exp(v - np.max(v))
-        probs = v / v.sum()
+        buf = io.BytesIO()
+        img.save(buf, format="JPEG", quality=85)
+        silent = label == "nottarget"
+        cap = f"{'✅ Clear area' if silent else '🚨 ALERT: ' + label.upper()} ({conf:.1f}%)"
+        send_photo(buf.getvalue(), cap, silent)
 
-        pred_idx = int(np.argmax(probs))
-        pred_label = labels[pred_idx]
-        confidence = float(probs[pred_idx] * 100)
-
-        # เตรียมรูปภาพสำหรับส่ง
-        img_buffer = io.BytesIO()
-        original_img.save(img_buffer, format='JPEG', quality=85)
-        img_data = img_buffer.getvalue()
-
-        # ==== Notification logic ====
-        if pred_label == "nottarget":
-            caption = f"✅ Clear area ({confidence:.1f}%)"
-            silent = True   # 🤫 ไม่มีเสียง
-        else:
-            caption = f"🚨 ALERT: {pred_label.upper()} detected ({confidence:.1f}%)"
-            silent = False  # 🔊 มีเสียงแจ้งเตือน
-
-        send_photo(img_data, caption, silent=silent)
-
-        return jsonify({
-            "prediction": pred_label,
-            "confidence": round(confidence, 1),
-            "time": get_thai_time()
-        })
-
+        return jsonify({"prediction": label, "confidence": round(conf, 1), "time": now()})
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
-
-print("🚀 Starting server...")
-model.load_any_model()
-
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 5000))
-    app.run(host="0.0.0.0", port=port, debug=False)
+    app.run(host="0.0.0.0", port=int(os.getenv("PORT", 5000)), debug=False)
+
