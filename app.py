@@ -6,18 +6,17 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# ==== Load labels ====
+# ==== โหลด labels ====
 def load_labels(file_path="labels.txt"):
     if not os.path.exists(file_path):
         print("⚠️ labels.txt not found, using fallback labels")
         return ["nottarget", "cow", "goat", "sheep"]
     with open(file_path, "r") as f:
         return [line.strip() for line in f if line.strip()]
-
 labels = load_labels()
-print(f"📄 Loaded labels: {labels}")
+print(f" Loaded labels: {labels}")
 
-# ==== Load TensorFlow Lite ====
+# ==== โหลด TensorFlow Lite ====
 def load_tflite():
     try:
         import tflite_runtime.interpreter as tflite
@@ -28,9 +27,8 @@ def load_tflite():
             return tf.lite, "tensorflow"
         except ImportError:
             return None, "none"
-
 tflite_module, tf_type = load_tflite()
-print(f"🧠 Using: {tf_type}")
+print(f" Using: {tf_type}")
 
 # ==== SmartModelLoader ====
 class SmartModelLoader:
@@ -44,9 +42,9 @@ class SmartModelLoader:
 
     def try_load_model(self, model_path):
         try:
-            print(f"🔄 Trying: {model_path}")
+            print(f"Trying: {model_path}")
             if not os.path.exists(model_path):
-                print(f"📄 Not found: {model_path}")
+                print(f"Not found: {model_path}")
                 return False
             self.interpreter = tflite_module.Interpreter(model_path=model_path)
             self.interpreter.allocate_tensors()
@@ -55,18 +53,18 @@ class SmartModelLoader:
             self.model_type = "float32"
             self.model_file = model_path
             self.loaded = True
-            print(f"✅ Loaded: {model_path}")
-            print(f"📐 Input shape: {self.input_details[0]['shape']}")
+            print(f"Loaded: {model_path}")
+            print(f"Input shape: {self.input_details[0]['shape']}")
             return True
         except Exception as e:
-            print(f"❌ Failed to load {model_path}: {e}")
+            print(f"Failed to load {model_path}: {e}")
             return False
 
     def load_any_model(self):
         for path in ["animal_model_float32_v1.tflite", "animal_model_float32.tflite"]:
             if self.try_load_model(path):
                 return True
-        print("❌ No compatible model found!")
+        print("No compatible model found!")
         return False
 
     def predict(self, image_array):
@@ -89,7 +87,7 @@ def get_thai_time():
 # ==== Telegram send photo ====
 def send_photo(image_bytes, caption="", silent=False):
     if not TOKEN or not CHAT_ID:
-        print("⚠️ Telegram not configured.")
+        print("Telegram not configured.")
         return False
     try:
         url = f"https://api.telegram.org/bot{TOKEN}/sendPhoto"
@@ -98,12 +96,12 @@ def send_photo(image_bytes, caption="", silent=False):
             'chat_id': CHAT_ID,
             'caption': caption,
             'parse_mode': 'HTML',
-            'disable_notification': silent  # ✅ True = เงียบ, False = มีเสียงแจ้งเตือน
+            'disable_notification': silent  
         }
         r = requests.post(url, files=files, data=data, timeout=15)
         return r.status_code == 200
     except Exception as e:
-        print("❌ Telegram error:", e)
+        print("Telegram error:", e)
         return False
 
 
