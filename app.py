@@ -1,5 +1,5 @@
 # =====================================================
-# 🧠 YOLOv8 Float32 Inference API (แก้ไข output parsing)
+# 🧠 YOLOv8 Float32 Inference API (Fixed JSON serialization)
 # =====================================================
 from flask import Flask, request, jsonify
 import numpy as np
@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# ==== Load labels (3-class only) ====
+# ==== Load labels ====
 def load_labels(file_path="labels.txt"):
     if not os.path.exists(file_path):
         print("⚠️ labels.txt not found, using default 3-class labels")
@@ -58,7 +58,7 @@ class SmartModelLoader:
             self.model_file = model_path
             
             input_shape = self.input_details[0]['shape']
-            self.input_size = input_shape[1]
+            self.input_size = int(input_shape[1])
             
             self.loaded = True
             print(f"✅ Model loaded: {model_path}")
@@ -92,9 +92,8 @@ def send_photo(image_bytes, caption=""):
         print("❌ Telegram error:", e)
         return False
 
-# ==== NMS (Non-Maximum Suppression) ====
+# ==== NMS ====
 def nms(boxes, scores, iou_threshold=0.5):
-    """Simple NMS implementation"""
     if len(boxes) == 0:
         return []
     
@@ -129,7 +128,7 @@ def nms(boxes, scores, iou_threshold=0.5):
     
     return keep
 
-# ==== Draw Bounding Boxes ====
+# ==== Draw Boxes ====
 def draw_boxes(image, detections, color=(255, 0, 0)):
     draw = ImageDraw.Draw(image)
     W, H = image.size
@@ -184,7 +183,6 @@ def load_model_route():
         "model_file": model.model_file if success else None
     })
 
-# ==== YOLOv8 Prediction (แก้ไขตรงนี้) ====
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
@@ -195,7 +193,6 @@ def predict():
         if not request.json or "image" not in request.json:
             return jsonify({"error": "No image provided"}), 400
 
-        # Decode image
         img_base64 = request.json["image"]
         img_bytes = base64.b64decode(img_base64)
         img_original = Image.open(io.BytesIO(img_bytes)).convert("RGB")
@@ -203,22 +200,17 @@ def predict():
         original_size = img_original.size
         print(f"📷 Original: {original_size[0]}×{original_size[1]}")
 
-        # Resize
         IMG_SIZE = model.input_size
         img_resized = img_original.resize((IMG_SIZE, IMG_SIZE))
         input_data = np.expand_dims(np.array(img_resized, dtype=np.float32) / 255.0, axis=0)
 
-        # Inference
         model.interpreter.set_tensor(model.input_details[0]['index'], input_data)
         model.interpreter.invoke()
         output_data = model.interpreter.get_tensor(model.output_details[0]['index'])
 
         print(f"📊 Raw output shape: {output_data.shape}")
 
-        # ✅ แก้ไข: รองรับ YOLOv8 output [1, 8400, 7] หรือ [1, 7, 8400]
-        output = np.squeeze(output_data)  # ลบ batch dimension
-        
-        # ถ้า shape เป็น [7, 8400] → transpose เป็น [8400, 7]
+        output = np.squeeze(output_data)
         if output.shape[0] < output.shape[1]:
             output = output.T
         
@@ -230,52 +222,44 @@ def predict():
         scores = []
         class_ids = []
 
-        # ✅ Parse YOLOv8 output: [x, y, w, h, class1_score, class2_score, class3_score]
         for det in output:
             if len(det) < 4 + num_classes:
                 continue
             
             x, y, w, h = det[:4]
             class_scores = det[4:4+num_classes]
-            
-            # Sigmoid activation
             class_scores = 1 / (1 + np.exp(-class_scores))
             
             cls_idx = int(np.argmax(class_scores))
             conf = float(class_scores[cls_idx])
             
-            # ✅ กรองตาม threshold และขนาดกรอบ
-            if conf > 0.5 and w > 0.01 and h > 0.01:  # เพิ่ม threshold
-                boxes.append([x, y, w, h])
-                scores.append(conf)
-                class_ids.append(cls_idx)
+            if conf > 0.5 and w > 0.01 and h > 0.01:
+                boxes.append([float(x), float(y), float(w), float(h)])
+                scores.append(float(conf))
+                class_ids.append(int(cls_idx))
 
         print(f"🔍 Before NMS: {len(boxes)} boxes")
 
-        # ✅ Apply NMS
         if len(boxes) > 0:
             keep_indices = nms(boxes, scores, iou_threshold=0.45)
             
             for idx in keep_indices:
                 detections.append({
-                    "bbox": [float(v) for v in boxes[idx]],
+                    "bbox": boxes[idx],
                     "confidence": round(scores[idx] * 100, 1),
                     "label": labels[class_ids[idx]]
                 })
 
         print(f"✅ After NMS: {len(detections)} detections")
 
-        # Draw boxes on resized image
         img_drawn = img_resized.copy()
         if detections:
             img_drawn = draw_boxes(img_drawn, detections)
 
-        # Convert to bytes
         img_buffer = io.BytesIO()
         img_drawn.save(img_buffer, format='JPEG', quality=90)
         photo_bytes = img_buffer.getvalue()
 
-        # Telegram
         if detections:
             best = max(detections, key=lambda x: x["confidence"])
             caption = (
@@ -297,18 +281,17 @@ def predict():
         return jsonify({
             "detections": detections,
             "count": len(detections),
-            "original_size": list(original_size),
-            "model_input_size": IMG_SIZE,
+            "original_size": [int(original_size[0]), int(original_size[1])],
+            "model_input_size": int(IMG_SIZE),
             "time": get_thai_time()
         })
 
     except Exception as e:
         import traceback
+        print("❌ Error details:")
         print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
-
-# ==== Start ====
 print("🚀 Starting YOLOv8 Detection API server...")
 model.try_load_model("best_float32.tflite")
 
