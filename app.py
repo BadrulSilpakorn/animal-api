@@ -162,22 +162,30 @@ def predict():
         img_bytes = base64.b64decode(img_base64)
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
 
-        
-        target_w, target_h = 320
-        img_resized = img.resize((target_w, target_h))
+        # ✅ Resize ให้ตรงกับโมเดล (320×320)
+        IMG_SIZE = 320
+        img_resized = img.resize((IMG_SIZE, IMG_SIZE))
         input_data = np.expand_dims(np.array(img_resized, dtype=np.float32) / 255.0, axis=0)
 
-        # Run inference
+        # Inference
         model.interpreter.set_tensor(model.input_details[0]['index'], input_data)
         model.interpreter.invoke()
         output_data = model.interpreter.get_tensor(model.output_details[0]['index'])
-        output = np.squeeze(output_data)
+
+        # ✅ บังคับให้ output เป็น 2D array เสมอ
+        output = np.array(output_data)
+        if output.ndim == 3:
+            output = np.squeeze(output, axis=0)
+        elif output.ndim == 1:
+            output = np.expand_dims(output, axis=0)
 
         detections = []
 
-        # Case 1: YOLO output (x, y, w, h, conf, cls)
+        # Case 1: (x, y, w, h, conf, cls)
         if output.shape[-1] == 6:
             for det in output:
+                if len(det) != 6:
+                    continue
                 x, y, w, h, conf, cls = det
                 if conf > 0.3:
                     label = labels[min(int(cls), len(labels) - 1)]
@@ -187,9 +195,11 @@ def predict():
                         "label": label
                     })
 
-        # Case 2: Raw output (x, y, w, h, class_scores)
+        # Case 2: raw (x, y, w, h, class_scores...)
         elif output.shape[-1] > 6:
             for det in output:
+                if len(det) < 5:
+                    continue
                 x, y, w, h = det[:4]
                 class_scores = 1 / (1 + np.exp(-det[4:]))  # sigmoid
                 cls = int(np.argmax(class_scores))
@@ -208,17 +218,17 @@ def predict():
         else:
             return jsonify({"error": f"Unsupported output shape: {output.shape}"}), 500
 
-        # Draw boxes (skip nottarget)
+        # Draw boxes
         img_drawn = img.copy()
         if detections:
             img_drawn = draw_boxes(img_drawn, detections)
 
-        # Save to bytes
+        # Convert to bytes
         img_buffer = io.BytesIO()
         img_drawn.save(img_buffer, format='JPEG', quality=85)
         photo_bytes = img_buffer.getvalue()
 
-        # Telegram caption logic
+        # Telegram
         if detections:
             best = max(detections, key=lambda x: x["confidence"])
             if best['label'] == "nottarget":
@@ -227,6 +237,7 @@ def predict():
                 caption = f"🚨 Detected: {best['label'].upper()} ({best['confidence']}%)"
         else:
             caption = "✅ No animals detected"
+
         send_photo(photo_bytes, caption)
 
         return jsonify({
