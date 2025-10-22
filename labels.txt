@@ -1,4 +1,0 @@
-cow
-goat
-nottarget
-sheep
