@@ -1,5 +1,5 @@
 # =====================================================
-# 🧠 YOLOv8 Float32 Inference API (3-class + nottarget)
+# 🧠 YOLOv8 Float32 Inference API (แก้ไข output parsing)
 # =====================================================
 from flask import Flask, request, jsonify
 import numpy as np
@@ -43,6 +43,7 @@ class SmartModelLoader:
         self.output_details = None
         self.loaded = False
         self.model_file = None
+        self.input_size = 320
 
     def try_load_model(self, model_path):
         try:
@@ -55,9 +56,13 @@ class SmartModelLoader:
             self.input_details = self.interpreter.get_input_details()
             self.output_details = self.interpreter.get_output_details()
             self.model_file = model_path
+            
+            input_shape = self.input_details[0]['shape']
+            self.input_size = input_shape[1]
+            
             self.loaded = True
             print(f"✅ Model loaded: {model_path}")
-            print(f"📐 Input shape: {self.input_details[0]['shape']}")
+            print(f"📐 Input shape: {input_shape}")
             print(f"📤 Output shape: {self.output_details[0]['shape']}")
             return True
         except Exception as e:
@@ -87,12 +92,49 @@ def send_photo(image_bytes, caption=""):
         print("❌ Telegram error:", e)
         return False
 
+# ==== NMS (Non-Maximum Suppression) ====
+def nms(boxes, scores, iou_threshold=0.5):
+    """Simple NMS implementation"""
+    if len(boxes) == 0:
+        return []
+    
+    boxes = np.array(boxes)
+    scores = np.array(scores)
+    
+    x1 = boxes[:, 0] - boxes[:, 2] / 2
+    y1 = boxes[:, 1] - boxes[:, 3] / 2
+    x2 = boxes[:, 0] + boxes[:, 2] / 2
+    y2 = boxes[:, 1] + boxes[:, 3] / 2
+    
+    areas = (x2 - x1) * (y2 - y1)
+    order = scores.argsort()[::-1]
+    
+    keep = []
+    while order.size > 0:
+        i = order[0]
+        keep.append(i)
+        
+        xx1 = np.maximum(x1[i], x1[order[1:]])
+        yy1 = np.maximum(y1[i], y1[order[1:]])
+        xx2 = np.minimum(x2[i], x2[order[1:]])
+        yy2 = np.minimum(y2[i], y2[order[1:]])
+        
+        w = np.maximum(0.0, xx2 - xx1)
+        h = np.maximum(0.0, yy2 - yy1)
+        inter = w * h
+        
+        iou = inter / (areas[i] + areas[order[1:]] - inter)
+        inds = np.where(iou <= iou_threshold)[0]
+        order = order[inds + 1]
+    
+    return keep
+
 # ==== Draw Bounding Boxes ====
 def draw_boxes(image, detections, color=(255, 0, 0)):
     draw = ImageDraw.Draw(image)
     W, H = image.size
     try:
-        font = ImageFont.truetype("arial.ttf", 16)
+        font = ImageFont.truetype("arial.ttf", 14)
     except:
         font = ImageFont.load_default()
 
@@ -101,26 +143,21 @@ def draw_boxes(image, detections, color=(255, 0, 0)):
         conf = det["confidence"]
         label = det["label"]
 
-        # แปลงจากสัดส่วน YOLO → พิกเซลจริง
         x1 = int((x - w / 2) * W)
         y1 = int((y - h / 2) * H)
         x2 = int((x + w / 2) * W)
         y2 = int((y + h / 2) * H)
 
-        # ไม่วาดกรอบถ้า label = nottarget
-        if label == "nottarget":
-            continue
-
-        draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=2)
         caption = f"{label} {conf:.1f}%"
 
-        # ✅ รองรับ Pillow 10+
         bbox = draw.textbbox((x1, y1), caption, font=font)
         text_w = bbox[2] - bbox[0]
         text_h = bbox[3] - bbox[1]
 
-        draw.rectangle([x1, y1 - text_h, x1 + text_w + 4, y1], fill=color)
-        draw.text((x1 + 2, y1 - text_h), caption, fill="white", font=font)
+        draw.rectangle([x1, y1 - text_h - 2, x1 + text_w + 4, y1], fill=color)
+        draw.text((x1 + 2, y1 - text_h - 2), caption, fill="white", font=font)
+    
     return image
 
 # ==== Routes ====
@@ -132,6 +169,7 @@ def home():
         "tensorflow": tf_type,
         "model_loaded": model.loaded,
         "model_file": model.model_file,
+        "input_size": model.input_size if model.loaded else None,
         "labels": labels,
         "time": get_thai_time(),
         "available_models": available,
@@ -139,14 +177,14 @@ def home():
     })
 
 @app.route("/load-model")
-def load_model():
+def load_model_route():
     success = model.try_load_model("best_float32.tflite")
     return jsonify({
         "success": success,
         "model_file": model.model_file if success else None
     })
 
-# ==== YOLOv8 Prediction ====
+# ==== YOLOv8 Prediction (แก้ไขตรงนี้) ====
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
@@ -160,11 +198,14 @@ def predict():
         # Decode image
         img_base64 = request.json["image"]
         img_bytes = base64.b64decode(img_base64)
-        img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        img_original = Image.open(io.BytesIO(img_bytes)).convert("RGB")
+        
+        original_size = img_original.size
+        print(f"📷 Original: {original_size[0]}×{original_size[1]}")
 
-        # ✅ Resize ให้ตรงกับโมเดล (320×320)
-        IMG_SIZE = 320
-        img_resized = img.resize((IMG_SIZE, IMG_SIZE))
+        # Resize
+        IMG_SIZE = model.input_size
+        img_resized = img_original.resize((IMG_SIZE, IMG_SIZE))
         input_data = np.expand_dims(np.array(img_resized, dtype=np.float32) / 255.0, axis=0)
 
         # Inference
@@ -172,81 +213,98 @@ def predict():
         model.interpreter.invoke()
         output_data = model.interpreter.get_tensor(model.output_details[0]['index'])
 
-        # ✅ บังคับให้ output เป็น 2D array เสมอ
-        output = np.array(output_data)
-        if output.ndim == 3:
-            output = np.squeeze(output, axis=0)
-        elif output.ndim == 1:
-            output = np.expand_dims(output, axis=0)
+        print(f"📊 Raw output shape: {output_data.shape}")
 
+        # ✅ แก้ไข: รองรับ YOLOv8 output [1, 8400, 7] หรือ [1, 7, 8400]
+        output = np.squeeze(output_data)  # ลบ batch dimension
+        
+        # ถ้า shape เป็น [7, 8400] → transpose เป็น [8400, 7]
+        if output.shape[0] < output.shape[1]:
+            output = output.T
+        
+        print(f"📊 Processed shape: {output.shape}")
+
+        num_classes = len(labels)
         detections = []
+        boxes = []
+        scores = []
+        class_ids = []
 
-        # Case 1: (x, y, w, h, conf, cls)
-        if output.shape[-1] == 6:
-            for det in output:
-                if len(det) != 6:
-                    continue
-                x, y, w, h, conf, cls = det
-                if conf > 0.3:
-                    label = labels[min(int(cls), len(labels) - 1)]
-                    detections.append({
-                        "bbox": [float(x), float(y), float(w), float(h)],
-                        "confidence": round(float(conf) * 100, 1),
-                        "label": label
-                    })
+        # ✅ Parse YOLOv8 output: [x, y, w, h, class1_score, class2_score, class3_score]
+        for det in output:
+            if len(det) < 4 + num_classes:
+                continue
+            
+            x, y, w, h = det[:4]
+            class_scores = det[4:4+num_classes]
+            
+            # Sigmoid activation
+            class_scores = 1 / (1 + np.exp(-class_scores))
+            
+            cls_idx = int(np.argmax(class_scores))
+            conf = float(class_scores[cls_idx])
+            
+            # ✅ กรองตาม threshold และขนาดกรอบ
+            if conf > 0.5 and w > 0.01 and h > 0.01:  # เพิ่ม threshold
+                boxes.append([x, y, w, h])
+                scores.append(conf)
+                class_ids.append(cls_idx)
 
-        # Case 2: raw (x, y, w, h, class_scores...)
-        elif output.shape[-1] > 6:
-            for det in output:
-                if len(det) < 5:
-                    continue
-                x, y, w, h = det[:4]
-                class_scores = 1 / (1 + np.exp(-det[4:]))  # sigmoid
-                cls = int(np.argmax(class_scores))
-                conf = float(class_scores[cls])
+        print(f"🔍 Before NMS: {len(boxes)} boxes")
 
-                if cls >= len(labels) or conf < 0.3:
-                    label = "nottarget"
-                else:
-                    label = labels[cls]
-
+        # ✅ Apply NMS
+        if len(boxes) > 0:
+            keep_indices = nms(boxes, scores, iou_threshold=0.45)
+            
+            for idx in keep_indices:
                 detections.append({
-                    "bbox": [float(x), float(y), float(w), float(h)],
-                    "confidence": round(conf * 100, 1),
-                    "label": label
+                    "bbox": [float(v) for v in boxes[idx]],
+                    "confidence": round(scores[idx] * 100, 1),
+                    "label": labels[class_ids[idx]]
                 })
-        else:
-            return jsonify({"error": f"Unsupported output shape: {output.shape}"}), 500
 
-        # Draw boxes
-        img_drawn = img.copy()
+        print(f"✅ After NMS: {len(detections)} detections")
+
+        # Draw boxes on resized image
+        img_drawn = img_resized.copy()
         if detections:
             img_drawn = draw_boxes(img_drawn, detections)
 
         # Convert to bytes
         img_buffer = io.BytesIO()
-        img_drawn.save(img_buffer, format='JPEG', quality=85)
+        img_drawn.save(img_buffer, format='JPEG', quality=90)
         photo_bytes = img_buffer.getvalue()
 
         # Telegram
         if detections:
             best = max(detections, key=lambda x: x["confidence"])
-            if best['label'] == "nottarget":
-                caption = f"✅ Clear area ({best['confidence']}%)"
-            else:
-                caption = f"🚨 Detected: {best['label'].upper()} ({best['confidence']}%)"
+            caption = (
+                f"🚨 <b>Detected: {best['label'].upper()}</b>\n"
+                f"📊 Confidence: {best['confidence']}%\n"
+                f"🔢 Total: {len(detections)}\n"
+                f"📐 {original_size[0]}×{original_size[1]} → {IMG_SIZE}×{IMG_SIZE}\n"
+                f"⏰ {get_thai_time()}"
+            )
         else:
-            caption = "✅ No animals detected"
+            caption = (
+                f"✅ <b>No animals detected</b>\n"
+                f"📐 {original_size[0]}×{original_size[1]} → {IMG_SIZE}×{IMG_SIZE}\n"
+                f"⏰ {get_thai_time()}"
+            )
 
         send_photo(photo_bytes, caption)
 
         return jsonify({
             "detections": detections,
             "count": len(detections),
+            "original_size": list(original_size),
+            "model_input_size": IMG_SIZE,
             "time": get_thai_time()
         })
 
     except Exception as e:
+        import traceback
+        print(traceback.format_exc())
         return jsonify({"error": str(e)}), 500
 
 
