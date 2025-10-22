@@ -3,7 +3,7 @@
 # =====================================================
 from flask import Flask, request, jsonify
 import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
 import io, base64, requests, os
 from datetime import datetime, timedelta
 
@@ -73,18 +73,6 @@ CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 def get_thai_time():
     return (datetime.utcnow() + timedelta(hours=7)).strftime('%H:%M:%S')
 
-def send_message(text):
-    if not TOKEN or not CHAT_ID:
-        print("⚠️ Telegram not configured")
-        return False
-    try:
-        url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-        data = {"chat_id": CHAT_ID, "text": text, "parse_mode": "HTML"}
-        requests.post(url, data=data, timeout=10)
-        return True
-    except:
-        return False
-
 def send_photo(image_bytes, caption=""):
     if not TOKEN or not CHAT_ID:
         print("⚠️ Telegram not configured")
@@ -95,10 +83,38 @@ def send_photo(image_bytes, caption=""):
         data = {'chat_id': CHAT_ID, 'caption': caption, 'parse_mode': 'HTML'}
         requests.post(url, files=files, data=data, timeout=15)
         return True
-    except:
+    except Exception as e:
+        print("❌ Telegram error:", e)
         return False
 
-# ==== Home route ====
+# ==== Draw Bounding Boxes ====
+def draw_boxes(image, detections, color=(255, 0, 0)):
+    draw = ImageDraw.Draw(image)
+    W, H = image.size
+    try:
+        font = ImageFont.truetype("arial.ttf", 16)
+    except:
+        font = ImageFont.load_default()
+
+    for det in detections:
+        x, y, w, h = det["bbox"]
+        conf = det["confidence"]
+        label = det["label"]
+
+        # แปลงค่าจากสัดส่วน YOLO → พิกเซลจริง
+        x1 = int((x - w / 2) * W)
+        y1 = int((y - h / 2) * H)
+        x2 = int((x + w / 2) * W)
+        y2 = int((y + h / 2) * H)
+
+        draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
+        caption = f"{label} {conf:.1f}%"
+        text_w, text_h = draw.textsize(caption, font=font)
+        draw.rectangle([x1, y1 - text_h, x1 + text_w + 4, y1], fill=color)
+        draw.text((x1 + 2, y1 - text_h), caption, fill="white", font=font)
+    return image
+
+# ==== Routes ====
 @app.route("/")
 def home():
     available = [f for f in os.listdir('.') if f.endswith('.tflite')]
@@ -113,7 +129,6 @@ def home():
         "telegram_ready": bool(TOKEN and CHAT_ID)
     })
 
-# ==== Load model ====
 @app.route("/load-model")
 def load_model():
     success = model.try_load_model("best_float32.tflite")
@@ -122,7 +137,7 @@ def load_model():
         "model_file": model.model_file if success else None
     })
 
-# ==== YOLOv8 Inference ====
+# ==== YOLOv8 Prediction ====
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
@@ -133,58 +148,54 @@ def predict():
         if not request.json or "image" not in request.json:
             return jsonify({"error": "No image provided"}), 400
 
-        # Decode image from base64
+        # Decode image
         img_base64 = request.json["image"]
         img_bytes = base64.b64decode(img_base64)
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
 
-        # Resize to YOLO input (adjust if your model used different size)
+        # Resize image for YOLOv8
         IMG_SIZE = model.input_details[0]['shape'][1]
         img_resized = img.resize((IMG_SIZE, IMG_SIZE))
         input_data = np.expand_dims(np.array(img_resized, dtype=np.float32) / 255.0, axis=0)
 
-        # Inference
+        # Run inference
         model.interpreter.set_tensor(model.input_details[0]['index'], input_data)
         model.interpreter.invoke()
         output_data = model.interpreter.get_tensor(model.output_details[0]['index'])[0]
 
-        # Decode detections (x, y, w, h, conf, class_id)
+        # Parse results: [x, y, w, h, conf, class_id]
         detections = []
         for det in output_data:
             x, y, w, h, conf, cls = det
-            if conf > 0.5:
+            if conf > 0.4:
+                label = labels[int(cls)] if int(cls) < len(labels) else "unknown"
                 detections.append({
                     "bbox": [float(x), float(y), float(w), float(h)],
-                    "confidence": float(conf),
-                    "class_id": int(cls)
+                    "confidence": round(float(conf) * 100, 1),
+                    "label": label
                 })
 
-        # Convert class_id → label
-        results = []
-        for d in detections:
-            label = labels[d["class_id"]] if d["class_id"] < len(labels) else "unknown"
-            results.append({
-                "label": label,
-                "confidence": round(d["confidence"] * 100, 1),
-                "bbox": d["bbox"]
-            })
+        # Draw boxes on original image
+        img_drawn = img.copy()
+        if detections:
+            img_drawn = draw_boxes(img_drawn, detections)
 
-        # Send to Telegram
+        # Save image to bytes
         img_buffer = io.BytesIO()
-        img.save(img_buffer, format='JPEG', quality=85)
+        img_drawn.save(img_buffer, format='JPEG', quality=85)
         photo_bytes = img_buffer.getvalue()
 
-        if results:
-            best = max(results, key=lambda x: x["confidence"])
-            caption = f"🚨 {best['label'].upper()} {best['confidence']}%"
+        # Send to Telegram
+        if detections:
+            best = max(detections, key=lambda x: x["confidence"])
+            caption = f"🚨 Detected: {best['label'].upper()} ({best['confidence']}%)"
         else:
             caption = "✅ No animals detected"
-
         send_photo(photo_bytes, caption)
 
         return jsonify({
-            "detections": results,
-            "count": len(results),
+            "detections": detections,
+            "count": len(detections),
             "time": get_thai_time()
         })
     except Exception as e:
@@ -192,7 +203,7 @@ def predict():
 
 
 # ==== Start ====
-print("🚀 Starting YOLOv8 API server...")
+print("🚀 Starting YOLOv8 Detection API server...")
 model.try_load_model("best_float32.tflite")
 
 if __name__ == "__main__":
