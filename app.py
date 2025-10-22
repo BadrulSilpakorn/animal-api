@@ -9,11 +9,11 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# ==== Load labels ====
+# ==== Load labels (3-class model) ====
 def load_labels(file_path="labels.txt"):
     if not os.path.exists(file_path):
-        print("⚠️ labels.txt not found, using default YOLO labels")
-        return ["cow", "goat", "sheep", "nottarget"]
+        print("⚠️ labels.txt not found, using default 3-class labels")
+        return ["cow", "goat", "sheep"]
     with open(file_path, "r") as f:
         return [line.strip() for line in f if line.strip()]
 
@@ -101,26 +101,23 @@ def draw_boxes(image, detections, color=(255, 0, 0)):
         conf = det["confidence"]
         label = det["label"]
 
-        # แปลงค่าจากสัดส่วน YOLO → พิกเซลจริง
+        # แปลงจากสัดส่วน YOLO → พิกเซลจริง
         x1 = int((x - w / 2) * W)
         y1 = int((y - h / 2) * H)
         x2 = int((x + w / 2) * W)
         y2 = int((y + h / 2) * H)
 
-        # วาดกรอบ
         draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
         caption = f"{label} {conf:.1f}%"
 
-        # ✅ ใช้ textbbox แทน textsize
+        # ✅ ใช้ textbbox แทน textsize (รองรับ Pillow 10+)
         bbox = draw.textbbox((x1, y1), caption, font=font)
         text_w = bbox[2] - bbox[0]
         text_h = bbox[3] - bbox[1]
 
-        # วาดพื้นหลังข้อความ
         draw.rectangle([x1, y1 - text_h, x1 + text_w + 4, y1], fill=color)
         draw.text((x1 + 2, y1 - text_h), caption, fill="white", font=font)
     return image
-
 
 # ==== Routes ====
 @app.route("/")
@@ -145,7 +142,7 @@ def load_model():
         "model_file": model.model_file if success else None
     })
 
-# ==== YOLOv8 Prediction ====
+# ==== YOLOv8 Prediction (3-class + nottarget) ====
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
@@ -174,54 +171,64 @@ def predict():
 
         detections = []
 
-        # Case 1: NMS already applied → 6 values [x, y, w, h, conf, cls]
+        # ✅ Case 1: NMS applied (x, y, w, h, conf, cls)
         if output.shape[-1] == 6:
             for det in output:
                 x, y, w, h, conf, cls = det
                 if conf > 0.4:
-                    label = labels[int(cls)] if int(cls) < len(labels) else "unknown"
+                    label = labels[min(int(cls), len(labels) - 1)]
                     detections.append({
                         "bbox": [float(x), float(y), float(w), float(h)],
                         "confidence": round(float(conf) * 100, 1),
                         "label": label
                     })
 
-        # Case 2: raw output → [x, y, w, h, class1, class2, ...]
+        # ✅ Case 2: raw output (x, y, w, h, class_scores...)
         elif output.shape[-1] > 6:
             for det in output:
                 x, y, w, h = det[:4]
                 class_scores = det[4:]
+
+                # Apply sigmoid → [0, 1]
+                class_scores = 1 / (1 + np.exp(-class_scores))
                 cls = int(np.argmax(class_scores))
                 conf = float(class_scores[cls])
-                if conf > 0.4:
-                    label = labels[cls] if cls < len(labels) else "unknown"
-                    detections.append({
-                        "bbox": [float(x), float(y), float(w), float(h)],
-                        "confidence": round(conf * 100, 1),
-                        "label": label
-                    })
+
+                # ถ้ามั่นใจน้อยหรือเกินจำนวน label → nottarget
+                if conf < 0.5 or cls >= len(labels):
+                    label = "nottarget"
+                else:
+                    label = labels[cls]
+
+                detections.append({
+                    "bbox": [float(x), float(y), float(w), float(h)],
+                    "confidence": round(conf * 100, 1),
+                    "label": label
+                })
         else:
             return jsonify({"error": f"Unsupported output shape: {output.shape}"}), 500
 
-        # Draw boxes on original image
+        # Draw boxes
         img_drawn = img.copy()
         if detections:
             img_drawn = draw_boxes(img_drawn, detections)
 
-        # Convert image to bytes
+        # Convert to bytes
         img_buffer = io.BytesIO()
         img_drawn.save(img_buffer, format='JPEG', quality=85)
         photo_bytes = img_buffer.getvalue()
 
-        # Send result to Telegram
+        # Telegram caption logic
         if detections:
             best = max(detections, key=lambda x: x["confidence"])
-            caption = f"🚨 Detected: {best['label'].upper()} ({best['confidence']}%)"
+            if best['label'] == "nottarget":
+                caption = f"✅ Clear area ({best['confidence']}%)"
+            else:
+                caption = f"🚨 Detected: {best['label'].upper()} ({best['confidence']}%)"
         else:
             caption = "✅ No animals detected"
         send_photo(photo_bytes, caption)
 
-        # Return JSON
         return jsonify({
             "detections": detections,
             "count": len(detections),
