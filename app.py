@@ -1,5 +1,5 @@
 # =====================================================
-# 🧠 YOLOv8 Float32 Inference API (Fixed JSON serialization)
+# 🧠 YOLOv8 Float32 (Fixed - proper output parsing)
 # =====================================================
 from flask import Flask, request, jsonify
 import numpy as np
@@ -8,6 +8,11 @@ import io, base64, requests, os
 from datetime import datetime, timedelta
 
 app = Flask(__name__)
+
+# ==== Config ====
+CONFIDENCE_THRESHOLD = 0.6  # ✅ เพิ่มเป็น 60%
+IOU_THRESHOLD = 0.45
+MAX_DETECTIONS = 20  # ✅ จำกัดจำนวน detection สูงสุด
 
 # ==== Load labels ====
 def load_labels(file_path="labels.txt"):
@@ -93,7 +98,7 @@ def send_photo(image_bytes, caption=""):
         return False
 
 # ==== NMS ====
-def nms(boxes, scores, iou_threshold=0.5):
+def nms(boxes, scores, iou_threshold=0.45):
     if len(boxes) == 0:
         return []
     
@@ -129,9 +134,16 @@ def nms(boxes, scores, iou_threshold=0.5):
     return keep
 
 # ==== Draw Boxes ====
-def draw_boxes(image, detections, color=(255, 0, 0)):
+def draw_boxes(image, detections):
     draw = ImageDraw.Draw(image)
     W, H = image.size
+    
+    colors = {
+        'cow': (255, 0, 0),      # แดง
+        'goat': (0, 255, 0),     # เขียว
+        'sheep': (0, 0, 255)     # น้ำเงิน
+    }
+    
     try:
         font = ImageFont.truetype("arial.ttf", 14)
     except:
@@ -141,6 +153,8 @@ def draw_boxes(image, detections, color=(255, 0, 0)):
         x, y, w, h = det["bbox"]
         conf = det["confidence"]
         label = det["label"]
+        
+        color = colors.get(label, (255, 255, 0))
 
         x1 = int((x - w / 2) * W)
         y1 = int((y - h / 2) * H)
@@ -170,6 +184,7 @@ def home():
         "model_file": model.model_file,
         "input_size": model.input_size if model.loaded else None,
         "labels": labels,
+        "confidence_threshold": CONFIDENCE_THRESHOLD,
         "time": get_thai_time(),
         "available_models": available,
         "telegram_ready": bool(TOKEN and CHAT_ID)
@@ -183,6 +198,7 @@ def load_model_route():
         "model_file": model.model_file if success else None
     })
 
+# ==== Prediction ====
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
@@ -198,50 +214,71 @@ def predict():
         img_original = Image.open(io.BytesIO(img_bytes)).convert("RGB")
         
         original_size = img_original.size
-        print(f"📷 Original: {original_size[0]}×{original_size[1]}")
+        print(f"\n📷 Original: {original_size[0]}×{original_size[1]}")
 
         IMG_SIZE = model.input_size
         img_resized = img_original.resize((IMG_SIZE, IMG_SIZE))
         input_data = np.expand_dims(np.array(img_resized, dtype=np.float32) / 255.0, axis=0)
 
+        # Inference
         model.interpreter.set_tensor(model.input_details[0]['index'], input_data)
         model.interpreter.invoke()
         output_data = model.interpreter.get_tensor(model.output_details[0]['index'])
 
         print(f"📊 Raw output shape: {output_data.shape}")
+        print(f"📊 Output dtype: {output_data.dtype}")
+        print(f"📊 Output range: [{output_data.min():.3f}, {output_data.max():.3f}]")
 
+        # ✅ Process output
         output = np.squeeze(output_data)
-        if output.shape[0] < output.shape[1]:
-            output = output.T
         
-        print(f"📊 Processed shape: {output.shape}")
-
+        # ถ้า shape เป็น [C, N] → transpose เป็น [N, C]
+        if len(output.shape) == 2 and output.shape[0] < output.shape[1]:
+            output = output.T
+            print(f"📊 Transposed to: {output.shape}")
+        
         num_classes = len(labels)
+        expected_features = 4 + num_classes  # x,y,w,h + 3 classes
+        
+        print(f"📊 Expected features: {expected_features}, Got: {output.shape[-1]}")
+
         detections = []
         boxes = []
         scores = []
         class_ids = []
 
-        for det in output:
-            if len(det) < 4 + num_classes:
+        # ✅ Parse detections
+        for i, det in enumerate(output):
+            if len(det) < expected_features:
                 continue
             
-            x, y, w, h = det[:4]
+            # YOLOv8 format: [x, y, w, h, class1, class2, class3]
+            x, y, w, h = det[0], det[1], det[2], det[3]
             class_scores = det[4:4+num_classes]
+            
+            # ✅ Sigmoid activation
             class_scores = 1 / (1 + np.exp(-class_scores))
             
             cls_idx = int(np.argmax(class_scores))
             conf = float(class_scores[cls_idx])
             
-            if conf > 0.5 and w > 0.01 and h > 0.01:
+            # ✅ กรองด้วย threshold + ขนาดกรอบที่สมเหตุสมผล
+            if (conf > CONFIDENCE_THRESHOLD and 
+                0.02 < w < 0.95 and  # กรอบต้องมีความกว้าง 2-95%
+                0.02 < h < 0.95 and  # กรอบต้องมีความสูง 2-95%
+                0 < x < 1 and 
+                0 < y < 1):
+                
                 boxes.append([float(x), float(y), float(w), float(h)])
                 scores.append(float(conf))
                 class_ids.append(int(cls_idx))
 
         print(f"🔍 Before NMS: {len(boxes)} boxes")
 
+        # ✅ Apply NMS
         if len(boxes) > 0:
-            keep_indices = nms(boxes, scores, iou_threshold=0.45)
+            keep_indices = nms(boxes, scores, iou_threshold=IOU_THRESHOLD)
+            keep_indices = keep_indices[:MAX_DETECTIONS]  # จำกัดจำนวน
             
             for idx in keep_indices:
                 detections.append({
@@ -251,7 +288,12 @@ def predict():
                 })
 
         print(f"✅ After NMS: {len(detections)} detections")
+        
+        # แสดง detection ที่ผ่าน
+        for det in detections:
+            print(f"  → {det['label']}: {det['confidence']}% at {det['bbox']}")
 
+        # Draw boxes
         img_drawn = img_resized.copy()
         if detections:
             img_drawn = draw_boxes(img_drawn, detections)
@@ -260,12 +302,19 @@ def predict():
         img_drawn.save(img_buffer, format='JPEG', quality=90)
         photo_bytes = img_buffer.getvalue()
 
+        # Telegram
         if detections:
             best = max(detections, key=lambda x: x["confidence"])
+            count_by_class = {}
+            for det in detections:
+                count_by_class[det['label']] = count_by_class.get(det['label'], 0) + 1
+            
+            summary = ", ".join([f"{k}:{v}" for k, v in count_by_class.items()])
+            
             caption = (
                 f"🚨 <b>Detected: {best['label'].upper()}</b>\n"
                 f"📊 Confidence: {best['confidence']}%\n"
-                f"🔢 Total: {len(detections)}\n"
+                f"🔢 Count: {summary}\n"
                 f"📐 {original_size[0]}×{original_size[1]} → {IMG_SIZE}×{IMG_SIZE}\n"
                 f"⏰ {get_thai_time()}"
             )
