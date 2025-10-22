@@ -107,12 +107,20 @@ def draw_boxes(image, detections, color=(255, 0, 0)):
         x2 = int((x + w / 2) * W)
         y2 = int((y + h / 2) * H)
 
+        # วาดกรอบ
         draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
         caption = f"{label} {conf:.1f}%"
-        text_w, text_h = draw.textsize(caption, font=font)
+
+        # ✅ ใช้ textbbox แทน textsize
+        bbox = draw.textbbox((x1, y1), caption, font=font)
+        text_w = bbox[2] - bbox[0]
+        text_h = bbox[3] - bbox[1]
+
+        # วาดพื้นหลังข้อความ
         draw.rectangle([x1, y1 - text_h, x1 + text_w + 4, y1], fill=color)
         draw.text((x1 + 2, y1 - text_h), caption, fill="white", font=font)
     return image
+
 
 # ==== Routes ====
 @app.route("/")
