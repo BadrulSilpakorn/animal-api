@@ -1,5 +1,5 @@
 # =====================================================
-# 🧠 YOLOv8 Float32 (Fixed - output parsing + alert policy)
+# 🧠 YOLOv8 Float32 (Fixed - output parsing + alert policy, TH captions)
 # =====================================================
 from flask import Flask, request, jsonify
 import numpy as np
@@ -25,6 +25,17 @@ def load_labels(file_path="labels.txt"):
 
 labels = load_labels()
 print(f"📄 Loaded labels: {labels}")
+
+# แผนที่ชื่อคลาส → ภาษาไทย (ใช้เฉพาะในข้อความ Telegram)
+TH_LABELS = {
+    "cow": "วัว",
+    "goat": "แพะ",
+    "sheep": "แกะ",
+    "background": "พื้นหลัง",
+    "nottarget": "ไม่ใช่สัตว์เป้าหมาย",
+    "no_animal": "ไม่พบสัตว์",
+    "": ""
+}
 
 # กำหนดชุดคลาสสำหรับ "แจ้งเตือน (มีเสียง)" และ "ส่งเงียบ"
 ALERT_CLASSES   = {"cow", "goat", "sheep"}                         # มีเสียง
@@ -283,7 +294,7 @@ def predict():
         for det in detections:
             print(f"  → {det['label']}: {det['confidence']}% at {det['bbox']}")
 
-        # Draw boxes (บนภาพ 320x320)
+        # Draw boxes (บนภาพรีไซซ์)
         img_drawn = img_resized.copy()
         if detections:
             img_drawn = draw_boxes(img_drawn, detections)
@@ -294,38 +305,47 @@ def predict():
         # ===== Alert Policy =====
         labels_in_frame = {d["label"] for d in detections}
         has_alert = any(lbl in ALERT_CLASSES for lbl in labels_in_frame)
-        only_silent = (len(detections) == 0) or all(lbl in SILENT_CLASSES for lbl in labels_in_frame)
 
-        # ทำสรุปจำนวนต่อคลาส
+        # ทำสรุปจำนวนต่อคลาส (เป็นไทยเพื่ออ่านข้อความง่าย)
         count_by_class = {}
         for d in detections:
             count_by_class[d['label']] = count_by_class.get(d['label'], 0) + 1
-        summary = ", ".join([f"{k}:{v}" for k, v in sorted(count_by_class.items())]) or "none"
+        # แสดงสรุปเป็นไทย เช่น "วัว:2, แพะ:1"
+        summary_list = []
+        for k, v in sorted(count_by_class.items()):
+            summary_list.append(f"{TH_LABELS.get(k, k)}:{v}")
+        summary_th = ", ".join(summary_list) if summary_list else "none"
 
-        # สร้างแคปชัน
+        # สร้างแคปชัน (ไม่มีบรรทัดขนาดภาพ)
         if detections:
             best = max(detections, key=lambda x: x["confidence"])
+            best_label_th = TH_LABELS.get(best["label"], best["label"].upper())
             caption = (
-                f"{'🚨' if has_alert else '✅'} <b>Detected</b>\n"
-                f"🔝 Top: <b>{best['label'].upper()}</b> ({best['confidence']}%)\n"
-                f"🔢 Count: {summary}\n"
-                f"📐 {original_size[0]}×{original_size[1]} → {IMG_SIZE}×{IMG_SIZE}\n"
-                f"⏰ {get_thai_time()}"
+                f"{'🚨' if has_alert else '✅'} <b>ตรวจพบ</b>\n"
+                f"🔝 ชนิด: <b>{best_label_th}</b> ({best['confidence']}%)\n"
+                f"🔢 จำนวน: {summary_th}\n"
+                f"⏰ เวลา: {get_thai_time()}"
             )
         else:
             caption = (
-                f"✅ <b>No animals (target) detected</b>\n"
-                f"📐 {original_size[0]}×{original_size[1]} → {IMG_SIZE}×{IMG_SIZE}\n"
-                f"⏰ {get_thai_time()}"
+                f"✅ <b>ไม่พบสัตว์เป้าหมายในภาพ</b>\n"
+                f"⏰ เวลา: {get_thai_time()}"
             )
 
         # ===== ส่ง Telegram ตามเงื่อนไข =====
         if has_alert:
             # มี cow/goat/sheep → ส่ง "มีเสียง"
-            send_message("🚨 <b>Animal intrusion detected!</b>", silent=False)
+            send_message("🚨 <b>ตรวจพบสัตว์บุกรุกในพื้นที่!</b>", silent=False)
             send_photo(photo_bytes, caption, silent=False)
         else:
             # เป็น background/nottarget หรือไม่เจอ → ส่งแบบเงียบ
+            # กรณีตรวจพบแต่เป็นคลาสเงียบ ให้เปลี่ยนหัวเรื่องเป็นข้อมูล
+            if len(detections) > 0:
+                caption = (
+                    f"ℹ️ <b>พบวัตถุที่ไม่ใช่สัตว์เป้าหมาย</b>\n"
+                    f"🔢 รายการ: {summary_th}\n"
+                    f"⏰ เวลา: {get_thai_time()}"
+                )
             send_photo(photo_bytes, caption, silent=True)
 
         return jsonify({
