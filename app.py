@@ -162,8 +162,8 @@ def predict():
         img_bytes = base64.b64decode(img_base64)
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
 
-        # Resize image (320x240 for ESP32-CAM)
-        target_w, target_h = 320, 240
+        
+        target_w, target_h = 320
         img_resized = img.resize((target_w, target_h))
         input_data = np.expand_dims(np.array(img_resized, dtype=np.float32) / 255.0, axis=0)
 
