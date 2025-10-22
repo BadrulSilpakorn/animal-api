@@ -161,31 +161,51 @@ def predict():
         # Run inference
         model.interpreter.set_tensor(model.input_details[0]['index'], input_data)
         model.interpreter.invoke()
-        output_data = model.interpreter.get_tensor(model.output_details[0]['index'])[0]
+        output_data = model.interpreter.get_tensor(model.output_details[0]['index'])
+        output = np.squeeze(output_data)
 
-        # Parse results: [x, y, w, h, conf, class_id]
         detections = []
-        for det in output_data:
-            x, y, w, h, conf, cls = det
-            if conf > 0.4:
-                label = labels[int(cls)] if int(cls) < len(labels) else "unknown"
-                detections.append({
-                    "bbox": [float(x), float(y), float(w), float(h)],
-                    "confidence": round(float(conf) * 100, 1),
-                    "label": label
-                })
+
+        # Case 1: NMS already applied → 6 values [x, y, w, h, conf, cls]
+        if output.shape[-1] == 6:
+            for det in output:
+                x, y, w, h, conf, cls = det
+                if conf > 0.4:
+                    label = labels[int(cls)] if int(cls) < len(labels) else "unknown"
+                    detections.append({
+                        "bbox": [float(x), float(y), float(w), float(h)],
+                        "confidence": round(float(conf) * 100, 1),
+                        "label": label
+                    })
+
+        # Case 2: raw output → [x, y, w, h, class1, class2, ...]
+        elif output.shape[-1] > 6:
+            for det in output:
+                x, y, w, h = det[:4]
+                class_scores = det[4:]
+                cls = int(np.argmax(class_scores))
+                conf = float(class_scores[cls])
+                if conf > 0.4:
+                    label = labels[cls] if cls < len(labels) else "unknown"
+                    detections.append({
+                        "bbox": [float(x), float(y), float(w), float(h)],
+                        "confidence": round(conf * 100, 1),
+                        "label": label
+                    })
+        else:
+            return jsonify({"error": f"Unsupported output shape: {output.shape}"}), 500
 
         # Draw boxes on original image
         img_drawn = img.copy()
         if detections:
             img_drawn = draw_boxes(img_drawn, detections)
 
-        # Save image to bytes
+        # Convert image to bytes
         img_buffer = io.BytesIO()
         img_drawn.save(img_buffer, format='JPEG', quality=85)
         photo_bytes = img_buffer.getvalue()
 
-        # Send to Telegram
+        # Send result to Telegram
         if detections:
             best = max(detections, key=lambda x: x["confidence"])
             caption = f"🚨 Detected: {best['label'].upper()} ({best['confidence']}%)"
@@ -193,6 +213,7 @@ def predict():
             caption = "✅ No animals detected"
         send_photo(photo_bytes, caption)
 
+        # Return JSON
         return jsonify({
             "detections": detections,
             "count": len(detections),
