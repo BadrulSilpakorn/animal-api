@@ -1,5 +1,5 @@
 # =====================================================
-# 🧠 YOLOv8 Float32 Inference API (Render/Flask)
+# 🧠 YOLOv8 Float32 Inference API (3-class + nottarget)
 # =====================================================
 from flask import Flask, request, jsonify
 import numpy as np
@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# ==== Load labels (3-class model) ====
+# ==== Load labels (3-class only) ====
 def load_labels(file_path="labels.txt"):
     if not os.path.exists(file_path):
         print("⚠️ labels.txt not found, using default 3-class labels")
@@ -107,10 +107,14 @@ def draw_boxes(image, detections, color=(255, 0, 0)):
         x2 = int((x + w / 2) * W)
         y2 = int((y + h / 2) * H)
 
+        # ไม่วาดกรอบถ้า label = nottarget
+        if label == "nottarget":
+            continue
+
         draw.rectangle([x1, y1, x2, y2], outline=color, width=3)
         caption = f"{label} {conf:.1f}%"
 
-        # ✅ ใช้ textbbox แทน textsize (รองรับ Pillow 10+)
+        # ✅ รองรับ Pillow 10+
         bbox = draw.textbbox((x1, y1), caption, font=font)
         text_w = bbox[2] - bbox[0]
         text_h = bbox[3] - bbox[1]
@@ -142,7 +146,7 @@ def load_model():
         "model_file": model.model_file if success else None
     })
 
-# ==== YOLOv8 Prediction (3-class + nottarget) ====
+# ==== YOLOv8 Prediction ====
 @app.route("/predict", methods=["POST"])
 def predict():
     try:
@@ -158,9 +162,9 @@ def predict():
         img_bytes = base64.b64decode(img_base64)
         img = Image.open(io.BytesIO(img_bytes)).convert("RGB")
 
-        # Resize image for YOLOv8
-        IMG_SIZE = model.input_details[0]['shape'][1]
-        img_resized = img.resize((IMG_SIZE, IMG_SIZE))
+        # Resize image (320x240 for ESP32-CAM)
+        target_w, target_h = 320, 240
+        img_resized = img.resize((target_w, target_h))
         input_data = np.expand_dims(np.array(img_resized, dtype=np.float32) / 255.0, axis=0)
 
         # Run inference
@@ -171,11 +175,11 @@ def predict():
 
         detections = []
 
-        # ✅ Case 1: NMS applied (x, y, w, h, conf, cls)
+        # Case 1: YOLO output (x, y, w, h, conf, cls)
         if output.shape[-1] == 6:
             for det in output:
                 x, y, w, h, conf, cls = det
-                if conf > 0.4:
+                if conf > 0.3:
                     label = labels[min(int(cls), len(labels) - 1)]
                     detections.append({
                         "bbox": [float(x), float(y), float(w), float(h)],
@@ -183,19 +187,15 @@ def predict():
                         "label": label
                     })
 
-        # ✅ Case 2: raw output (x, y, w, h, class_scores...)
+        # Case 2: Raw output (x, y, w, h, class_scores)
         elif output.shape[-1] > 6:
             for det in output:
                 x, y, w, h = det[:4]
-                class_scores = det[4:]
-
-                # Apply sigmoid → [0, 1]
-                class_scores = 1 / (1 + np.exp(-class_scores))
+                class_scores = 1 / (1 + np.exp(-det[4:]))  # sigmoid
                 cls = int(np.argmax(class_scores))
                 conf = float(class_scores[cls])
 
-                # ถ้ามั่นใจน้อยหรือเกินจำนวน label → nottarget
-                if conf < 0.5 or cls >= len(labels):
+                if cls >= len(labels) or conf < 0.3:
                     label = "nottarget"
                 else:
                     label = labels[cls]
@@ -208,12 +208,12 @@ def predict():
         else:
             return jsonify({"error": f"Unsupported output shape: {output.shape}"}), 500
 
-        # Draw boxes
+        # Draw boxes (skip nottarget)
         img_drawn = img.copy()
         if detections:
             img_drawn = draw_boxes(img_drawn, detections)
 
-        # Convert to bytes
+        # Save to bytes
         img_buffer = io.BytesIO()
         img_drawn.save(img_buffer, format='JPEG', quality=85)
         photo_bytes = img_buffer.getvalue()
@@ -234,6 +234,7 @@ def predict():
             "count": len(detections),
             "time": get_thai_time()
         })
+
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
