@@ -1,6 +1,4 @@
-# =====================================================
-# 🧠 YOLOv8 Float32 (Fixed - output parsing + alert policy, TH captions)
-# =====================================================
+
 from flask import Flask, request, jsonify
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
@@ -9,16 +7,15 @@ from datetime import datetime, timedelta
 
 app = Flask(__name__)
 
-# ==== Config ====
+# Config 
 CONFIDENCE_THRESHOLD = 0.6
 IOU_THRESHOLD = 0.45
 MAX_DETECTIONS = 20
 
-# ==== Load labels ====
+# Load labels
 def load_labels(file_path="labels.txt"):
     if not os.path.exists(file_path):
         print("⚠️ labels.txt not found, using default 4-class labels")
-        # รองรับ background เป็นคลาสที่ 0 ตามโมเดลใหม่
         return ["background", "cow", "goat", "sheep"]
     with open(file_path, "r") as f:
         return [line.strip() for line in f if line.strip()]
@@ -26,7 +23,6 @@ def load_labels(file_path="labels.txt"):
 labels = load_labels()
 print(f"📄 Loaded labels: {labels}")
 
-# แผนที่ชื่อคลาส → ภาษาไทย (ใช้เฉพาะในข้อความ Telegram)
 TH_LABELS = {
     "cow": "วัว",
     "goat": "แพะ",
@@ -37,11 +33,11 @@ TH_LABELS = {
     "": ""
 }
 
-# กำหนดชุดคลาสสำหรับ "แจ้งเตือน (มีเสียง)" และ "ส่งเงียบ"
-ALERT_CLASSES   = {"cow", "goat", "sheep"}                         # มีเสียง
-SILENT_CLASSES  = {"background", "nottarget", "no_animal", ""}     # เงียบ (ยืดหยุ่นชื่อ)
 
-# ==== Load TensorFlow Lite ====
+ALERT_CLASSES   = {"cow", "goat", "sheep"}                         
+SILENT_CLASSES  = {"background", "nottarget", "no_animal", ""}    
+
+# Load TensorFlow Lite 
 def load_tflite():
     try:
         import tflite_runtime.interpreter as tflite
@@ -56,7 +52,7 @@ def load_tflite():
 tflite_module, tf_type = load_tflite()
 print(f"🧠 Using backend: {tf_type}")
 
-# ==== Model Loader ====
+#  Model Loader 
 class SmartModelLoader:
     def __init__(self):
         self.interpreter = None
