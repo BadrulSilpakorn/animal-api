@@ -212,7 +212,7 @@ def home():
 
 @app.route("/load-model")
 def load_model_route():
-    success = model.try_load_model("best_float32.tflite")
+    success = model.try_load_model("best_float16.tflite")
     return jsonify({"success": success, "model_file": model.model_file if success else None})
 
 # ==== Prediction ====
@@ -220,7 +220,7 @@ def load_model_route():
 def predict():
     try:
         if not model.loaded:
-            if not model.try_load_model("best_float32.tflite"):
+            if not model.try_load_model("best_float16.tflite"):
                 return jsonify({"error": "No model loaded"}), 500
 
         if not request.json or "image" not in request.json:
@@ -360,7 +360,7 @@ def predict():
         return jsonify({"error": str(e)}), 500
 
 print("🚀 Starting YOLOv8 Detection API server...")
-model.try_load_model("best_float32.tflite")
+model.try_load_model("best_float16.tflite")
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
